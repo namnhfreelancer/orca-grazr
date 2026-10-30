@@ -1,0 +1,11 @@
+{
+  "name": "orca-grazr",
+  "version": "0.6.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "placeholder": "node scripts/render-placeholder.mjs"
+  },
+  "license": "MIT"
+}

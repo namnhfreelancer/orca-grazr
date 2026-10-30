@@ -1,0 +1,2566 @@
+"""grazr — rotate to a fresh Claude account before the current one runs out.
+
+Entry points: statusline (Claude's status-line command, after every message),
+decide (detached from it), failure (Claude's StopFailure hook) and recover
+(detached from it), tag (a Herdr event), install, uninstall and swap
+(Herdr actions), enrol and status (popup panes). All Herdr I/O lives here.
+Claude's own files live in claude.py, the accounts grazr enrolled in
+accounts.py, where credentials are kept in stores.py, and the decision itself
+is core.decide.
+"""
+
+import contextlib
+import fcntl
+import getpass
+import json
+import os
+import shlex
+import subprocess
+import sys
+import termios
+import tty
+from collections import namedtuple
+from datetime import datetime, timedelta, timezone
+
+import accounts
+import atomic
+import claude
+import core
+import pins
+import stores
+
+# model_limits and parked_poll_minutes default off, and pinned_rotation to
+# exclude, so a Config built without them reads as before.
+Config = namedtuple(
+    "Config", "thresholds accounts enabled dry_run model_limits parked_poll_minutes pinned_rotation",
+    defaults=(False, 0, pins.EXCLUDE),
+)
+
+Runtime = namedtuple("Runtime", "paths store state_dir config")
+
+# Reported by `status --json`.
+VERSION = "0.4.7+fork.10"
+
+DEFAULT_CONFIG = """\
+# Rotate when a limit group has less than this percent left.
+REMAINING_SESSION=15     # the 5-hour window
+REMAINING_WEEKLY=10      # weekly windows, incl. per-model ones
+
+# Preference order. First account with headroom wins.
+ACCOUNTS=""
+
+ENABLED=1
+DRY_RUN=0                # 1 = log the decision, do not swap
+MODEL_LIMITS=0           # 1 = also watch per-model weekly limits, from Claude's usage endpoint
+PARKED_POLL_MINUTES=0    # re-read parked accounts' usage this often, refreshing their tokens; 0 = never
+PINNED_ROTATION=exclude  # exclude = an account pinned to an agent is never rotated to; keep = it still is
+"""
+
+_THRESHOLD_KEYS = {"REMAINING_SESSION": ("session", 15), "REMAINING_WEEKLY": ("weekly", 10)}
+_FLAG_KEYS = (("ENABLED", True), ("DRY_RUN", False), ("MODEL_LIMITS", False))
+
+LOG = "grazr.log"
+# Shared by install, enrol and status, so the wording that refuses a takeover lives once.
+# Under Herdr the forced connect is an action, since a Herdr action takes no flag.
+TAKEOVER_HINT = ("disconnect it there, or take it over with install --force "
+                 "(under Herdr: the \"connect, taking over\" action)")
+FOREIGN_OWNER_REFUSAL = ("Claude's status line or StopFailure hook already belongs to another grazr "
+                         "(state in %s); " + TAKEOVER_HINT)
+# A bar of the user's that runs another grazr is never taken over, forced or not.
+FOREIGN_BAR_REFUSAL = ("Claude's status line is your own bar running another grazr (state in %s); "
+                       "edit the bar by hand, --force leaves it alone")
+PREVIOUS_STATUSLINE = claude.PREVIOUS_STATUSLINE
+UNREADABLE_PENDING = "statusline.unreadable.json"
+# Only a live session can miss twice, so the armed set never needs to be large.
+UNREADABLE_PENDING_CAP = 64
+# No Claude version is the empty string, so it marks a session that has
+# carried limits and can never be a renamed field.
+PROVEN = ""
+
+# A turn Claude ended on an API error, from its StopFailure hook. The first
+# group says the account itself is unusable, so grazr leaves it out until it is
+# enrolled again or a status line shows it answering. A rate limit only lasts
+# until its window resets.
+BLOCKED = "blocked.json"            # {account id: {reason, at, until, reading}}
+BLOCKED_LOCK = "blocked.lock"
+LAST_ROTATION = "last_rotation.json"  # {"to": account id, "at": unix time}
+BLOCKING_ERRORS = ("oauth_org_not_allowed", "billing_error", "account_on_hold", "authentication_failed")
+RATE_LIMIT_ERROR = "rate_limit"
+# Every pane and teammate on the old account fails at once, and a request
+# already out when the swap landed fails after it. Those failures belong to the
+# account that left, so they are not held against the one that just arrived.
+FAILURE_GRACE_SECONDS = 60
+# A rate limit with no window on record to pin it to.
+RATE_LIMIT_FALLBACK_SECONDS = 3600
+
+# MODEL_LIMITS: per-model weekly limits, read from Claude's usage endpoint.
+SCOPED_STATE = "scoped.json"        # {account id: unix time of the last request}
+SCOPED_LOCK = "scoped.lock"
+MODELS_SEEN = "models_seen.json"    # {"models": {display name: unix time}}
+# One request per active account per interval, whatever the number of panes.
+SCOPED_POLL_SECONDS = 120
+# A model counts as in use while a pane reported it this recently.
+MODEL_RECENT_SECONDS = 15 * 60
+
+# PARKED_POLL_MINUTES: a parked account's reading is otherwise frozen at the
+# moment grazr left it, so one that refilled, or whose limit the server lifted,
+# still reads as spent until its reset.
+PARKED_STATE = "parked.json"        # {"at": unix time of the last poll}
+PARKED_LOCK = "parked.lock"
+
+TAG = "grazr"
+ESCAPE = "\x1b"
+CLOSE_KEYS = (ESCAPE, "q", "\r", "\n", "")
+
+# Telling the user is worth a moment, but not a stuck status line.
+NOTIFY_TIMEOUT_SECONDS = 5
+# A toast that did not appear is tried again, but not on every message.
+NOTICE_RETRY_SECONDS = 60
+# A rotation reports to every Claude pane, so none of them may hang.
+TAG_TIMEOUT_SECONDS = 5
+STATUSLINE_TIMEOUT_SECONDS = 5
+
+# LOCAL PATCH (devbox, 2026-09-20): this box is headless and its client is
+# cmux over SSH, which ignores Herdr's OSC 99 toasts. Every toast is also
+# forwarded as OSC 777 through this script, which cmux does show.
+OSC777_SCRIPT = os.path.expanduser("~/.config/herdr/notify/notify-send-osc777.sh")
+
+
+def _forward_osc777(title, body):
+    """Best effort, and never waited on: a toast is not worth a stuck pane."""
+    if not os.path.exists(OSC777_SCRIPT):
+        return
+    try:
+        subprocess.Popen(
+            [OSC777_SCRIPT, title, body],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        pass
+
+
+# The queue that `notices-drain` empties, and the lock it takes. The queue has
+# its own lock because `_announce_once` holds notices.lock while it notifies.
+NOTICES_QUEUE = "notices.jsonl"
+NOTICES_QUEUE_LOCK = "notices.queue.lock"
+NOTICES_QUEUE_MAX = 200
+
+
+def notify(title, body, spawn=subprocess.run):
+    """Show a notice through every backend GRAZR_NOTIFIER names. Returns
+    whether one of them showed it, which is what `_announce_once` retries on.
+
+    Unset or empty means Herdr's toast alone, which is what grazr always did.
+    A list of only `none`, or of `none` and unknown names, is a deliberate
+    silence, so it counts as shown rather than being retried forever.
+    """
+    shown = False
+    for backend in _notifiers():
+        shown = _NOTIFIERS[backend](title, body, spawn) or shown
+    return shown or _deliberately_silent()
+
+
+def _notifiers():
+    """The backends GRAZR_NOTIFIER names, in order. Unknown names are dropped,
+    and so is `none`, which is no backend at all, so a typo silences that
+    backend, never the hook."""
+    return [name for name in _configured_names() if name in _NOTIFIERS]
+
+
+def _configured_names():
+    names = (os.environ.get("GRAZR_NOTIFIER") or "herdr").split(",")
+    return [name.strip() for name in names]
+
+
+def _deliberately_silent():
+    """Whether GRAZR_NOTIFIER names `none` and no backend that exists."""
+    names = _configured_names()
+    return "none" in names and not any(name in _NOTIFIERS for name in names)
+
+
+def _notify_herdr(title, body, spawn):
+    """Herdr's own toast. Returns whether it was actually shown.
+
+    `herdr notification show` exits 0 even when nothing appears: toasts are off
+    by default (`[ui.toast] delivery`), a toast already on screen returns busy,
+    and there is a rate limit. Treating that as success would leave the user
+    never told, so the caller gets the truth.
+
+    An in-app toast is a 3 second blink whatever the sound: the API path pins
+    the kind to UpdateInstalled and only the delivery mode changes how long it
+    lasts. Users who want to read it set `delivery = "system"` or `"terminal"`
+    in Herdr, which is why the body stays short enough for either and why it
+    makes a sound: grazr only speaks up for a swap, a restriction, or having
+    nowhere left to go.
+    """
+    herdr = os.environ.get("HERDR_BIN_PATH")
+    if not herdr:
+        return False
+    _forward_osc777(title, body)
+    try:
+        completed = spawn(
+            [herdr, "notification", "show", title, "--body", body, "--sound", "request"],
+            capture_output=True,
+            text=True,
+            timeout=NOTIFY_TIMEOUT_SECONDS,
+        )
+        return json.loads(completed.stdout)["result"]["shown"] is True
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return False
+
+
+def _notify_queue(title, body, spawn):
+    """Queue the notice for `notices-drain`, which the Orca plugin runs every
+    two minutes to show it as an OS notification.
+
+    Always True when the write works: the queue is durable, so `_announce_once`
+    must never retry a notice already in it, or the user would be told twice.
+    The file keeps only its last NOTICES_QUEUE_MAX notices, so an undrained
+    queue cannot grow without bound.
+    """
+    state_dir = _state_dir()
+    path = os.path.join(state_dir, NOTICES_QUEUE)
+    line = json.dumps({"ts": _now_ts(), "title": title, "body": body}) + "\n"
+    try:
+        with _file_lock(os.path.join(state_dir, NOTICES_QUEUE_LOCK), wait=True) as held:
+            if not held:
+                return False
+            with open(path, "a") as handle:
+                handle.write(line)
+            with open(path) as handle:
+                lines = handle.readlines()
+            if len(lines) > NOTICES_QUEUE_MAX:
+                atomic.write(path, "".join(lines[-NOTICES_QUEUE_MAX:]))
+    except OSError:
+        return False
+    return True
+
+
+def _notify_osascript(title, body, spawn):
+    """A macOS notification. The text travels as argv, never inside the
+    AppleScript, so a quote or a `do shell script` in it stays text."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        completed = spawn(
+            ["/usr/bin/osascript", "-e", "on run argv",
+             "-e", "display notification (item 2 of argv) with title (item 1 of argv)",
+             "-e", "end run", title, body],
+            capture_output=True,
+            text=True,
+            timeout=NOTIFY_TIMEOUT_SECONDS,
+        )
+        return completed.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+_NOTIFIERS = {"herdr": _notify_herdr, "queue": _notify_queue, "osascript": _notify_osascript}
+
+
+def tag_all(name, spawn=subprocess.run, pinned=None):
+    """Publish the active account to every Claude pane as the `$grazr` token,
+    and to a pinned pane the account it is pinned to (`pinned`, {pane id:
+    label}), since a rotation never moves that one.
+
+    Herdr shows it only where the user's own sidebar row names `$grazr`, so
+    without that row nothing appears. Best-effort: a tag is never worth
+    failing a rotation over.
+    """
+    # Without a Herdr binary there is no pane to tag, so nothing is asked.
+    if not os.environ.get("HERDR_BIN_PATH"):
+        return
+    pinned = pinned or {}
+    for pane_id, tokens in _claude_panes(spawn):
+        wanted = pinned.get(pane_id, name)
+        if wanted and tokens.get(TAG) != wanted:
+            tag_pane(pane_id, wanted, spawn)
+
+
+def tag_pane(pane_id, name, spawn=subprocess.run):
+    """One pane, unless it is being read. Herdr can snap a scrolled viewport
+    back to the bottom when it repaints metadata, and a pane nobody was
+    watching must not jump because another pane rotated."""
+    if not os.environ.get("HERDR_BIN_PATH") or not pane_id or _is_scrolled(pane_id, spawn):
+        return
+    _herdr(spawn, "pane", "report-metadata", pane_id, "--source", TAG,
+           "--token", "%s=%s" % (TAG, name))
+
+
+def _claude_panes(spawn):
+    """(pane id, current tokens) for every pane running Claude, and nothing for
+    the other agents: they spend no Claude account."""
+    answer = _herdr(spawn, "agent", "list")
+    try:
+        agents = json.loads(answer)["result"]["agents"]
+    except (KeyError, TypeError, ValueError):
+        return []
+    return [
+        (entry.get("pane_id"), entry.get("tokens") or {})
+        for entry in agents
+        if isinstance(entry, dict) and entry.get("agent") == "claude" and entry.get("pane_id")
+    ]
+
+
+def _live_panes(spawn=subprocess.run):
+    """Every pane id Herdr knows, or None when it could not say."""
+    if not os.environ.get("HERDR_BIN_PATH"):
+        return None
+    answer = _herdr(spawn, "pane", "list")
+    try:
+        return [entry["pane_id"] for entry in json.loads(answer)["result"]["panes"]]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _pinned_labels(state_dir, enrolled):
+    """{pane id: tag} for the panes Claude runs pinned in."""
+    return {
+        pane: pins.label(_name_of(enrolled, account))
+        for pane, account in pins.running_on(state_dir).items()
+    }
+
+
+def _is_scrolled(pane_id, spawn):
+    answer = _herdr(spawn, "pane", "get", pane_id)
+    try:
+        scroll = json.loads(answer)["result"]["pane"]["scroll"]
+        return scroll["offset_from_bottom"] > 0
+    except (KeyError, TypeError, ValueError):
+        # Repainting a pane someone is reading is the worse mistake, so an
+        # unreadable answer counts as scrolled.
+        return True
+
+
+def _herdr(spawn, *arguments):
+    """Returns stdout, or "" for anything that went wrong."""
+    herdr = os.environ.get("HERDR_BIN_PATH")
+    if not herdr:
+        return ""
+    try:
+        completed = spawn(
+            [herdr, *arguments],
+            capture_output=True,
+            text=True,
+            timeout=TAG_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return completed.stdout if completed.returncode == 0 else ""
+
+
+def act_on(decision, runtime, active_id, limits, enrolled=(), now=None, why=None):
+    """Carry out what core.decide concluded, and report it. Returns the line
+    that goes to stdout, which Herdr keeps in `herdr plugin log`. `why` names
+    the reason for a rotation when the reading cannot: a refused account."""
+    paths, store, state_dir, config = runtime
+    dry_run = config.dry_run
+    if decision == "stay":
+        return None
+
+    def name_of(identifier):
+        return _name_of(enrolled, identifier)
+
+    if decision == "unenrolled":
+        line = "Nothing to rotate to. Enrol a second account and list it in ACCOUNTS"
+        announced = _announce_once(
+            state_dir, "unenrolled", "grazr: no second account", line
+        )
+        return line if announced else None
+
+    if decision == "exhausted":
+        # Below your thresholds, not cut off by the server: these accounts still
+        # serve requests, so saying they are spent would stop you working for
+        # no reason.
+        readings = {entry.id: entry.snapshot for entry in enrolled}
+        readings[active_id] = limits
+        line = "Every account is below your thresholds, earliest reset %s" % _earliest_reset(
+            now or datetime.now(timezone.utc), config.thresholds, readings, enrolled
+        )
+        # Keyed on the line, so a change of window earns its own announcement.
+        announced = _announce_once(state_dir, line, "grazr: every account is low", line)
+        return line if announced else None
+
+    kind, payload = decision
+
+    if kind == "override":
+        line = (
+            "%s in settings.json puts Claude on API-key auth, so a swap changes nothing"
+            % payload
+        )
+        announced = _announce_once(
+            state_dir, "override:%s" % payload, "grazr: not rotating", line
+        )
+        return line if announced else None
+
+    next_id = payload
+    if dry_run:
+        return "DRY_RUN: would rotate %s -> %s" % (name_of(active_id), name_of(next_id))
+
+    note = claude.rotate(paths, store, active_id, next_id, limits)
+    accounts.mark_first_reading_due(paths, next_id)
+    now = now or datetime.now(timezone.utc)
+    _record_arrival(state_dir, next_id, now)
+    if why is None:
+        low = core.shortfall(limits or [], now, config.thresholds)
+        if low:
+            why = ", %s %d%% < %d%%" % (low.group, low.remaining, config.thresholds[low.group])
+        elif core.expiring_sooner(limits or [], active_id, enrolled, now, config.thresholds) == next_id:
+            why = ", its week ends sooner"
+        else:
+            why = ""
+    line = "Rotated %s -> %s%s%s" % (name_of(active_id), name_of(next_id), why, note or "")
+    shown = notify(
+        "grazr: now on %s" % name_of(next_id),
+        "Remote Control needs /remote-control per pane",
+    )
+    # A rotation resolves every open situation, so a record left behind would
+    # silence it the next time it is real. A pane that sends no limits stays
+    # blind on the new account, so that record is kept.
+    notices = {
+        key: seen for key, seen in _read_notices(state_dir).items() if key.startswith("unreadable:")
+    }
+    notices[line] = _notice_state(shown)
+    _write_notices(state_dir, notices)
+    return line
+
+
+def _name_of(accounts, identifier):
+    """The name enrolment gave an account, or its id when grazr never saw it."""
+    return {entry.id: entry.name for entry in accounts}.get(identifier, identifier)
+
+
+def _moved(decision, dry_run):
+    """Whether a credential actually changed hands, which is the only thing
+    worth repainting the panes for."""
+    return not dry_run and isinstance(decision, tuple) and decision[0] == "rotate"
+
+
+def _earliest_reset(now, thresholds, readings, enrolled):
+    """When the first of these accounts could take over again, which one, and
+    the window holding it back, as a local weekday and clock time since it ends
+    up in a toast. "unknown" when no window says.
+
+    Spent windows are the only ones that count, on the same terms core keeps
+    headroom. A healthy window reopening leaves every account as spent as it
+    was, so quoting its reset promises a wait that changes nothing, and a spent
+    one with no reset time keeps its account out entirely rather than let a
+    sibling window speak for it. An account is free once the last of its spent
+    windows has reset, so that one speaks for it, and the first free wins."""
+    freed = []
+    for identifier, snapshot in readings.items():
+        if not isinstance(snapshot, list):
+            continue
+        spent = [
+            entry
+            for entry in snapshot
+            if entry.group in thresholds
+            and entry.remaining < thresholds[entry.group]
+            and (entry.resets_at is None or entry.resets_at > now)
+        ]
+        if spent and all(entry.resets_at for entry in spent):
+            freed.append(max((entry.resets_at, entry.group, identifier) for entry in spent))
+    if not freed:
+        return "unknown"
+    when, group, identifier = min(freed)
+    return "%s (%s, %s window)" % (
+        when.astimezone().strftime("%a %H:%M"), _name_of(enrolled, identifier), group
+    )
+
+
+def _announce_once(state_dir, key, title, body):
+    """Report a situation once, across two channels that fail differently.
+
+    The plugin log is the durable record and must not depend on the toast:
+    Herdr's toasts are off by default. The toast is ephemeral and Herdr drops it
+    while another is on screen, so it is retried until it is really shown.
+
+    Returns whether this situation is new, which is what earns a log line. The
+    branches that call it are reached on every message of every pane, and two
+    panes reaching a new situation together would both call it new, so the
+    store is read and written under a lock. Every open situation is kept, or
+    two of them would evict each other and toast in turns.
+
+    A toast that did not appear is tried again no sooner than
+    NOTICE_RETRY_SECONDS later: every try costs a herdr call and a forwarded
+    OSC 777, and a toast herdr never shows would otherwise cost that on every
+    message of every pane.
+    """
+    with _file_lock(os.path.join(state_dir, "notices.lock")) as held:
+        if not held:
+            return False
+        notices = _read_notices(state_dir)
+        if key in notices:
+            state = notices[key]
+            if state is not True and _now_ts() - _last_try(state) >= NOTICE_RETRY_SECONDS:
+                notices[key] = _notice_state(notify(title, body))
+                _write_notices(state_dir, notices)
+            return False
+        notices[key] = _notice_state(notify(title, body))
+        _write_notices(state_dir, notices)
+        return True
+
+
+def _notice_state(shown):
+    """True once the toast appeared, else when it was last tried."""
+    return True if shown else _now_ts()
+
+
+def _last_try(state):
+    """Older stores hold False for a toast never shown."""
+    return state if isinstance(state, (int, float)) and state is not True else 0
+
+
+def _now_ts():
+    return datetime.now(timezone.utc).timestamp()
+
+
+def _read_notices(state_dir):
+    try:
+        with open(os.path.join(state_dir, "notices.json")) as handle:
+            notices = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return notices if isinstance(notices, dict) else {}
+
+
+def _write_notices(state_dir, notices):
+    atomic.write(os.path.join(state_dir, "notices.json"), json.dumps(notices))
+
+
+def load_config(path):
+    """Parse config.env, seeding it on first run. Every problem names its key:
+    a threshold typo that silently defaulted would rotate at the wrong moment."""
+    if not os.path.exists(path):
+        _seed_config(path)
+
+    settings = {}
+    with open(path) as handle:
+        for number, line in enumerate(handle, start=1):
+            tokens = shlex.split(line, comments=True)
+            if not tokens:
+                continue
+            # A quoted value survives as one token, so leftovers mean it was
+            # unquoted, and every name after the first would be lost.
+            if len(tokens) >= 3 and tokens[1] == "=":
+                key, value, leftover = tokens[0], tokens[2], tokens[3:]
+            else:
+                key, separator, value = tokens[0].partition("=")
+                leftover = tokens[1:]
+                if not separator or not key:
+                    raise ValueError("%s line %d: expected KEY=value" % (path, number))
+            if leftover:
+                raise ValueError(
+                    '%s line %d: quote the value, as in %s="%s"'
+                    % (path, number, key, " ".join([value] + leftover))
+                )
+            if key in settings:
+                raise ValueError("%s line %d: %s is set twice" % (path, number, key))
+            settings[key] = value
+
+    # An omitted setting takes the documented default. A misspelt one is
+    # rejected below, so a typo can never quietly become a default.
+    thresholds = {}
+    for key, (group, default) in _THRESHOLD_KEYS.items():
+        thresholds[group] = _percent(settings.pop(key, None), key, default)
+    flags = [_flag(settings.pop(key, None), key, default) for key, default in _FLAG_KEYS]
+    parked_poll_minutes = _minutes(settings.pop("PARKED_POLL_MINUTES", None), "PARKED_POLL_MINUTES")
+    pinned_rotation = settings.pop("PINNED_ROTATION", None) or pins.EXCLUDE
+    if pinned_rotation not in pins.ROTATION_MODES:
+        raise ValueError("PINNED_ROTATION must be %s, got %r" % (" or ".join(pins.ROTATION_MODES), pinned_rotation))
+    accounts = shlex.split(settings.pop("ACCOUNTS", "") or "")
+    if len(set(accounts)) != len(accounts):
+        raise ValueError("ACCOUNTS lists the same account twice: %s" % " ".join(accounts))
+    if settings:
+        raise ValueError("Unknown setting(s): %s" % ", ".join(sorted(settings)))
+
+    return Config(
+        thresholds=thresholds, accounts=accounts, enabled=flags[0], dry_run=flags[1],
+        model_limits=flags[2], parked_poll_minutes=parked_poll_minutes,
+        pinned_rotation=pinned_rotation,
+    )
+
+
+def _seed_config(path):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    try:
+        with open(path, "x") as handle:
+            handle.write(DEFAULT_CONFIG)
+    except FileExistsError:
+        pass
+
+
+def _percent(value, key, default):
+    if value is None:
+        return default
+    try:
+        number = int(value)
+    except ValueError:
+        raise ValueError("%s must be a whole percent, got %r" % (key, value))
+    if not 0 <= number <= 100:
+        raise ValueError("%s must be between 0 and 100, got %d" % (key, number))
+    return number
+
+
+def _minutes(value, key):
+    if value is None:
+        return 0
+    try:
+        number = int(value)
+    except ValueError:
+        raise ValueError("%s must be a whole number of minutes, got %r" % (key, value))
+    if number < 0:
+        raise ValueError("%s must be 0 or more, got %d" % (key, number))
+    return number
+
+
+def _flag(value, key, default):
+    if value is None:
+        return default
+    if value not in ("0", "1"):
+        raise ValueError("%s must be 0 or 1, got %r" % (key, value))
+    return value == "1"
+
+
+def read_key(stream=None):
+    """One keypress, no Enter, so Esc can close a pane. Falls back to a line
+    when stdin is not a terminal, which is how the tests drive it."""
+    stream = stream or sys.stdin
+    if not stream.isatty():
+        line = stream.readline()
+        return line.strip()[:1].lower() if line.strip() else ESCAPE
+
+    descriptor = stream.fileno()
+    saved = termios.tcgetattr(descriptor)
+    try:
+        tty.setraw(descriptor)
+        key = stream.read(1)
+    finally:
+        termios.tcsetattr(descriptor, termios.TCSADRAIN, saved)
+    if key == "\x03":
+        # Raw mode swallows the signal, so Ctrl+C has to be re-raised by hand.
+        raise KeyboardInterrupt
+    return key.lower()
+
+
+def _runtime():
+    """Everything an entry point works on, read off the environment once.
+
+    Entry points take one rather than building their own, so a caller can hand
+    over a sandbox instead of reaching the real keychain and account files.
+    """
+    paths, store, state_dir = _paths()
+    return Runtime(
+        paths=paths, store=store, state_dir=state_dir, config=load_config(_config_path())
+    )
+
+
+def _state_dir():
+    # GRAZR_STATE_DIR is what a host other than Herdr sets, such as Orca.
+    return (
+        os.environ.get("GRAZR_STATE_DIR")
+        or os.environ.get("HERDR_PLUGIN_STATE_DIR")
+        or os.path.expanduser("~/.grazr")
+    )
+
+
+def _paths():
+    state_dir = _state_dir()
+    accounts_dir = os.path.join(state_dir, "accounts")
+    os.makedirs(accounts_dir, exist_ok=True)
+    # With CLAUDE_CONFIG_DIR set, Claude keeps its .claude.json inside that
+    # directory rather than in the home directory.
+    isolated = os.environ.get("CLAUDE_CONFIG_DIR")
+    config_dir = isolated or os.path.expanduser("~/.claude")
+    config_path = (
+        os.path.join(isolated, ".claude.json") if isolated else os.path.expanduser("~/.claude.json")
+    )
+    return (
+        claude.Paths(
+            config_path=config_path,
+            config_dir=config_dir,
+            accounts_dir=accounts_dir,
+        ),
+        stores.default_store(isolated, config_dir, state_dir, getpass.getuser()),
+        state_dir,
+    )
+
+
+def _config_path():
+    directory = (
+        os.environ.get("GRAZR_CONFIG_DIR")
+        or os.environ.get("HERDR_PLUGIN_CONFIG_DIR")
+        or os.path.expanduser("~/.grazr")
+    )
+    return os.path.join(directory, "config.env")
+
+
+# Said by the refusal and by `status`, so the two cannot drift apart.
+MANAGED_NOTICE = (
+    "runs an Orca-managed Claude account (%s); "
+    "grazr only rotates the System default login"
+)
+
+
+def managed_claude_home():
+    """The config dir of the Orca-managed Claude account this process runs in,
+    or None for the System default login, which is the only one grazr rotates.
+    Not cached: the environment is read each time, so a test can change it."""
+    injected = os.environ.get("ORCA_CLAUDE_INJECTED_CONFIG_DIR")
+    if injected:
+        return injected
+    # Orca's profiles live under .../claude-profiles/, on every launch path.
+    isolated = os.environ.get("CLAUDE_CONFIG_DIR")
+    if isolated and "/claude-profiles/" in isolated:
+        return isolated
+    return None
+
+
+def statusline(runtime=None, payload=None, spawn=subprocess.run, detach=None):
+    """Runs inside Claude after every message, with the status-line payload on
+    stdin. The bar stays the one configured before grazr. Claude cancels this
+    command when the next update arrives, so the swap runs detached, in
+    `decide`, where a kill cannot leave it half done."""
+    payload = sys.stdin.read() if payload is None else payload
+    state_dir = runtime.state_dir if runtime else _state_dir()
+    print(_previous_bar(state_dir, payload, spawn), end="", flush=True)
+    # Orca's usage chip is the bar printed above. Nothing below runs in a managed pane.
+    if managed_claude_home():
+        return 0
+    runtime = runtime or _runtime()
+    paths, store, state_dir, config = runtime
+
+    if not config.enabled:
+        return 0
+    limits = claude.statusline_limits(payload)
+    if limits is None:
+        _warn_unreadable(state_dir, payload)
+        return 0
+    _disarm_unreadable(state_dir, payload)
+    now = datetime.now(timezone.utc)
+    pinned = os.environ.get(pins.ENV_PIN)
+    if pinned:
+        return _pinned_reading(runtime, pinned, limits, now)
+    if config.model_limits:
+        try:
+            _note_model(state_dir, payload, now)
+        except Exception:  # noqa: BLE001 -- noting the model must never cost the bar
+            pass
+    active = claude.active_account(paths)
+    if active is None:
+        _report_signed_out(state_dir)
+        return 0
+    enrolled = accounts.load(paths, [])
+    if _left_behind(limits, active, enrolled):
+        return 0
+    _unblock_if_answering(state_dir, active, limits, enrolled, now)
+    with _file_lock(os.path.join(state_dir, "readings.lock"), wait=True):
+        previous = _latest_reading(paths, active)
+        name = _name_of(enrolled, active)
+        _log_leftovers(state_dir, now, name, core.replaced(previous, limits, now))
+        limits = core.merged(previous, limits, now)
+        if not config.model_limits:
+            # Only the usage endpoint reports per-model limits, so with the
+            # setting off the last ones would linger; they go at once.
+            limits = [entry for entry in limits if entry.scope is None]
+        # An idle pane repeats an old figure every minute, and a payload can
+        # lack a window that ran out while the account was parked. Either can
+        # be the first payload after a swap. Only a reading that lowers a
+        # window or opens one is a turn on the new account.
+        if core.moved(previous, limits) and accounts.first_reading_due(paths, active):
+            _log(state_dir, now, "First reading on %s after the swap: %s" % (name, _cost(previous, limits)))
+            accounts.mark_first_reading_due(paths, active, due=False)
+        accounts.record_snapshot(paths, active, limits)
+        # A parked account is the one grazr chose to leave, so what its window
+        # had left when it ran out is the number that says whether leaving was
+        # right. Nobody reads for it, so its record is checked here instead.
+        for parked in enrolled:
+            if parked.id == active or not isinstance(parked.snapshot, list):
+                continue
+            expired = core.replaced(parked.snapshot, [], now)
+            if expired:
+                _log_leftovers(state_dir, now, parked.name, expired)
+                accounts.record_snapshot(paths, parked.id, core.merged(parked.snapshot, [], now))
+    # The status line never carries a per-model limit; merged() keeps the last
+    # one the usage endpoint gave, and it binds only while a pane is on that model.
+    models = _models_in_use(state_dir, now)
+    relevant = _relevant(limits, models)
+    rotate = core.needs_rotation(relevant, now, config.thresholds) or bool(core.expiring_sooner(
+        relevant, active, _bound(_usable(state_dir, enrolled, active, now, config), models), now, config.thresholds
+    ))
+    due = config.model_limits and _scoped_due(state_dir, store, active, now)
+    if not rotate and not due:
+        return 0
+    if not any(entry.id == active for entry in enrolled):
+        if rotate:
+            _report_unenrolled_active(state_dir, active)
+        return 0
+    (detach or (lambda: _detach_decide(state_dir)))()
+    return 0
+
+
+def _pinned_reading(runtime, account_id, limits, now):
+    """A pane pinned to an account reports that account's usage, not the shared
+    login's, so the reading is recorded there. Nothing moves: the pane keeps
+    its account to the limit, and grazr only says when it is running low."""
+    paths, _, state_dir, config = runtime
+    enrolled = accounts.load(paths, [])
+    if not any(entry.id == account_id for entry in enrolled):
+        return 0
+    with _file_lock(os.path.join(state_dir, "readings.lock"), wait=True):
+        previous = _latest_reading(paths, account_id)
+        limits = core.merged(previous, limits, now)
+        if not config.model_limits:
+            limits = [entry for entry in limits if entry.scope is None]
+        accounts.record_snapshot(paths, account_id, limits)
+    low = core.shortfall([entry for entry in limits if entry.scope is None], now, config.thresholds)
+    if low is not None:
+        name = _name_of(enrolled, account_id)
+        resets = low.resets_at.isoformat() if low.resets_at else "never"
+        _announce_once(
+            state_dir, "pinned-low:%s:%s:%s" % (account_id, low.kind, resets),
+            "grazr: pinned %s is running low" % name,
+            "%s %d%% left. Its agent stays on it; pin it elsewhere to move it" % (_window_name(low), low.remaining),
+        )
+    return 0
+
+
+def _relevant(snapshot, models):
+    """A per-model limit binds only while some pane is using that model. An
+    account out of one model still serves every other, so running out of it
+    must not move a pane working on another."""
+    if not isinstance(snapshot, list):
+        return snapshot
+    # A substring, since the endpoint names a model "Fable" and the status line
+    # says "Fable 5.1 (1M context)".
+    return [
+        entry for entry in snapshot
+        if entry.scope is None
+        or any(str(entry.scope).lower() in model.lower() for model in models)
+    ]
+
+
+def _bound(enrolled, models):
+    """Accounts with only the windows that bind for the models in use."""
+    return [entry._replace(snapshot=_relevant(entry.snapshot, models)) for entry in enrolled]
+
+
+def _read_models_seen(state_dir):
+    try:
+        with open(os.path.join(state_dir, MODELS_SEEN)) as handle:
+            seen = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    models = seen.get("models") if isinstance(seen, dict) else None
+    if not isinstance(models, dict):
+        return {}
+    return {name: when for name, when in models.items() if isinstance(when, (int, float))}
+
+
+def _note_model(state_dir, payload, now):
+    """Remember which model a pane is on. Written at most once a minute per
+    model, since this runs on every message."""
+    try:
+        model = json.loads(payload).get("model") or {}
+        name = model.get("display_name") or model.get("id")
+    except (ValueError, AttributeError, TypeError):
+        return
+    if not isinstance(name, str) or not name:
+        return
+    models = _read_models_seen(state_dir)
+    stamp = now.timestamp()
+    if stamp - models.get(name, 0) < 60:
+        return
+    models[name] = stamp
+    models = {key: when for key, when in models.items() if stamp - when < 24 * 3600}
+    try:
+        atomic.write(os.path.join(state_dir, MODELS_SEEN), json.dumps({"models": models}))
+    except OSError:
+        pass
+
+
+def _models_in_use(state_dir, now):
+    stamp = now.timestamp()
+    return [
+        name for name, when in _read_models_seen(state_dir).items()
+        if stamp - when < MODEL_RECENT_SECONDS
+    ]
+
+
+def _read_scoped_state(state_dir):
+    try:
+        with open(os.path.join(state_dir, SCOPED_STATE)) as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _scoped_due(state_dir, store, active, now):
+    """A request is worth a detached process only once the last one for this
+    account is old enough, and only with a claude.ai login to ask with. The
+    interval is checked first: it is a file read, where the login can be a
+    keychain call the status line must not pay on every message."""
+    last = _read_scoped_state(state_dir).get(active)
+    if isinstance(last, (int, float)) and now.timestamp() - last < SCOPED_POLL_SECONDS:
+        return False
+    try:
+        return claude.access_token(store.read_live()) is not None
+    except Exception:  # noqa: BLE001 -- a keychain refusal must not cost the bar
+        return False
+
+
+def _refresh_scoped(runtime, now):
+    """Ask for the active login's per-model limits and keep them in its
+    snapshot. One process at a time, and a failure waits for the next
+    interval rather than asking again at once."""
+    paths, store, state_dir, config = runtime
+    if not config.model_limits:
+        return
+    active = claude.active_account(paths)
+    if active is None or not _scoped_due(state_dir, store, active, now):
+        return
+    with _file_lock(os.path.join(state_dir, SCOPED_LOCK)) as acquired:
+        if not acquired:
+            return
+        state = _read_scoped_state(state_dir)
+        state[active] = now.timestamp()
+        try:
+            atomic.write(os.path.join(state_dir, SCOPED_STATE), json.dumps(state))
+        except OSError:
+            return
+        limits = claude.fetch_usage_limits(store.read_live())
+        # A swap while the request was out makes the reply another account's.
+        if limits is None or claude.active_account(paths) != active:
+            return
+        with _file_lock(os.path.join(state_dir, "readings.lock"), wait=True):
+            previous = _latest_reading(paths, active)
+            unscoped = [entry for entry in previous if entry.scope is None] if isinstance(previous, list) else []
+            # The server's own figures, laid over the record as they come. The
+            # status line's merge keeps a window's lowest reading, so a figure
+            # from before the server lifted a limit would otherwise read as
+            # spent until the reset. Model limits the reply no longer names go.
+            accounts.record_snapshot(paths, active, core.overwritten(unscoped, limits, now))
+
+
+def _refresh_parked(runtime, now, force=False, include_active=False):
+    """Read every parked account's usage from the endpoint, refreshing a lapsed
+    token first, and lay it over that account's record. At most once per
+    PARKED_POLL_MINUTES unless `force`, and one process at a time. Returns
+    (name, limits or None) per account asked, for `grazr.py refresh`."""
+    paths, store, state_dir, config = runtime
+    if not force and not config.parked_poll_minutes:
+        return []
+    with _file_lock(os.path.join(state_dir, PARKED_LOCK)) as acquired:
+        if not acquired:
+            return []
+        last = _read_parked_state(state_dir).get("at")
+        if (not force and isinstance(last, (int, float))
+                and now.timestamp() - last < config.parked_poll_minutes * 60):
+            return []
+        atomic.write(os.path.join(state_dir, PARKED_STATE), json.dumps({"at": now.timestamp()}))
+        active = claude.active_account(paths)
+        report = []
+        for entry in accounts.load(paths, config.accounts):
+            if entry.id == active:
+                if not include_active:
+                    continue
+                # Claude's own login: read with it, never refresh it.
+                blob = store.read_live()
+            else:
+                blob = _current_parked_login(runtime, entry, now)
+            limits = claude.fetch_usage_limits(blob) if blob else None
+            if limits is not None:
+                if not config.model_limits:
+                    limits = [limit for limit in limits if limit.scope is None]
+                with _file_lock(os.path.join(state_dir, "readings.lock"), wait=True):
+                    previous = _latest_reading(paths, entry.id)
+                    accounts.record_snapshot(paths, entry.id, core.overwritten(previous, limits, now))
+            report.append((entry.name, limits))
+        return report
+
+
+def _read_parked_state(state_dir):
+    try:
+        with open(os.path.join(state_dir, PARKED_STATE)) as handle:
+            state = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _current_parked_login(runtime, entry, now):
+    """`entry`'s parked login with a usable access token, refreshing a lapsed
+    one, or None. A refresh spends the old refresh token, so it runs under the
+    rotation lock: no swap can read the parked login half way and install a
+    spent pair. Busy means a swap is under way, and this account waits for the
+    next poll."""
+    paths, store, state_dir, _ = runtime
+    blob = store.read_parked(entry.id)
+    now_ms = now.timestamp() * 1000
+    if blob is None or not claude.token_expired(blob, now_ms):
+        return blob
+    with _rotation_lock(state_dir) as acquired:
+        if not acquired:
+            return None
+        # Swapped in meanwhile: the login is Claude's now, and so is its refresh.
+        if claude.active_account(paths) == entry.id:
+            return None
+        blob = store.read_parked(entry.id)
+        if blob is None or not claude.token_expired(blob, now_ms):
+            return blob
+        fresh = claude.refreshed_login(blob)
+        if fresh is None:
+            _log(state_dir, now, "Could not refresh the parked token of %s" % entry.name)
+            return None
+        try:
+            store.write_parked(entry.id, fresh)
+        except (OSError, ValueError, RuntimeError) as error:
+            _log(
+                state_dir, now,
+                "Refreshed the parked token of %s but could not store it (%s). Enrol it again"
+                % (entry.name, error),
+            )
+            return None
+        return fresh
+
+
+def refresh(runtime=None):
+    """Read every account's usage now, the live one too, whatever the interval.
+    For a client that wants current numbers on demand."""
+    home = managed_claude_home()
+    if home:
+        return _refuse_managed(home)
+    runtime = runtime or _runtime()
+    now = datetime.now(timezone.utc)
+    pins.prune(runtime.state_dir, _live_panes())
+    for name, limits in _refresh_parked(runtime, now, force=True, include_active=True):
+        print("%s: %s" % (name, "no reading" if limits is None else _describe(limits)))
+    return 0
+
+
+def _log_leftovers(state_dir, now, name, expired):
+    for window in expired:
+        _log(state_dir, now, "%s %s window reset with %d%% left" % (name, _window_name(window), window.remaining))
+
+
+def _window_name(entry):
+    """"session", "weekly", or "Fable weekly" for a per-model one."""
+    return "%s %s" % (entry.scope, entry.group) if entry.scope else entry.group
+
+
+def _cost(parked, limits):
+    """Each window before and after the first turn on the account, as in
+    "session 100% -> 97%". A window not on record when parked was fresh."""
+    before = {
+        (entry.kind, entry.group, entry.scope, entry.resets_at): entry.remaining
+        for entry in (parked if isinstance(parked, list) else [])
+    }
+    return ", ".join(
+        "%s %d%% -> %d%%" % (
+            _window_name(entry),
+            before.get((entry.kind, entry.group, entry.scope, entry.resets_at), 100),
+            entry.remaining,
+        )
+        for entry in limits
+    )
+
+
+def _report_unenrolled_active(state_dir, active):
+    """A login grazr never enrolled has no account file to keep its reading, so
+    the decision would find nothing and stay without a word."""
+    line = "This login is not enrolled, so grazr cannot rotate away on its own. Use the swap key or enrol it"
+    if _announce_once(state_dir, "unenrolled-active:%s" % active, "grazr: login not enrolled", line):
+        _log(state_dir, datetime.now(timezone.utc), line)
+
+
+def _report_signed_out(state_dir):
+    """No account against a live reading means Claude signed out. Logged once
+    until something else is, since every message of every pane reaches this."""
+    line = "Claude is signed out, so grazr has no account to read for"
+    if not _logged_last(state_dir, line):
+        _log(state_dir, datetime.now(timezone.utc), line)
+
+
+def _warn_unreadable(state_dir, payload):
+    """A renamed field would leave grazr blind, so a completed turn with no
+    limits is worth a warning (a turn that never reached the API has none to
+    send). The block is also missing for a turn after a resume or reset, so the
+    first miss in a session only arms it: a reading with limits disarms that
+    session, and only a session that misses twice trips the warning, announced
+    once per version."""
+    try:
+        sent = json.loads(payload)
+        spoken = sent["context_window"]["total_input_tokens"] > 0
+        session = sent.get("session_id")
+        version = sent.get("version", "unknown")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return
+    if not spoken or not session:
+        return
+    armed = _pending_unreadable(state_dir)
+    # A session that has carried limits before has proven the field name. Its
+    # later misses are a window that ran out before the next request, which is
+    # what every payload looks like right after a weekly reset.
+    if armed.get(session) == PROVEN:
+        return
+    if session not in armed:
+        armed[session] = version
+        if len(armed) > UNREADABLE_PENDING_CAP:
+            armed.pop(next(iter(armed)))
+        _write_pending_unreadable(state_dir, armed)
+        return
+    line = "Claude %s sends no rate limits in its status line, so grazr sees no usage" % version
+    if _announce_once(state_dir, "unreadable:%s" % version, "grazr: cannot read Claude's usage", line):
+        _log(state_dir, datetime.now(timezone.utc), line)
+
+
+def _disarm_unreadable(state_dir, payload):
+    """A reading that carries limits proves the session can read them, for
+    good."""
+    try:
+        session = json.loads(payload).get("session_id")
+    except (ValueError, AttributeError):
+        return
+    if not session:
+        return
+    armed = _pending_unreadable(state_dir)
+    if armed.get(session) != PROVEN:
+        armed[session] = PROVEN
+        if len(armed) > UNREADABLE_PENDING_CAP:
+            armed.pop(next(iter(armed)))
+        _write_pending_unreadable(state_dir, armed)
+
+
+def _pending_unreadable(state_dir):
+    """Sessions that have missed once, mapped to their Claude version, and
+    sessions that have carried limits, mapped to PROVEN. The old list format
+    is read as empty, so the upgrade starts fresh."""
+    try:
+        with open(os.path.join(state_dir, UNREADABLE_PENDING)) as handle:
+            armed = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return armed if isinstance(armed, dict) else {}
+
+
+def _write_pending_unreadable(state_dir, armed):
+    # No lock: a rare arm/disarm race only delays a warning, never invents one.
+    atomic.write(os.path.join(state_dir, UNREADABLE_PENDING), json.dumps(armed))
+
+
+def _detach_decide(state_dir):
+    with open(os.path.join(state_dir, LOG), "a") as log:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "decide"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log,
+            start_new_session=True,
+        )
+
+
+def decide(runtime=None):
+    """Swap if the latest reading says so. Runs detached from the status line
+    that recorded it, so Claude cancelling that cannot stop a swap half way.
+    The parked accounts are read afterwards, so their requests never hold up
+    a swap that is due now."""
+    if managed_claude_home():
+        return 0
+    runtime = runtime or _runtime()
+    try:
+        return _decide(runtime)
+    finally:
+        try:
+            _refresh_parked(runtime, datetime.now(timezone.utc))
+        except Exception as error:  # noqa: BLE001 -- a detached step has no one to tell
+            print("grazr: parked reading failed: %s" % type(error).__name__, file=sys.stderr)
+
+
+def _decide(runtime):
+    paths, store, state_dir, config = runtime
+    now = datetime.now(timezone.utc)
+    try:
+        _refresh_scoped(runtime, now)
+    except Exception as error:  # noqa: BLE001 -- the decision must still run
+        print("grazr: per-model reading failed: %s" % type(error).__name__, file=sys.stderr)
+    with _rotation_lock(state_dir) as acquired:
+        if not acquired:
+            return 0
+        active = claude.active_account(paths)
+        limits = _latest_reading(paths, active)
+        if limits is None:
+            return 0
+        models = _models_in_use(state_dir, now)
+        enrolled = _bound(_usable(state_dir, accounts.load(paths, config.accounts), active, now, config), models)
+        decision = core.decide(_relevant(limits, models), active, enrolled, now, config.thresholds)
+        # rotate refuses this too, but a raised error suits the person who just
+        # pressed a key, not every message of every pane.
+        if isinstance(decision, tuple):
+            override = claude.settings_auth_override(paths.config_dir)
+            if override:
+                decision = ("override", override)
+        try:
+            line = act_on(decision, runtime, active, limits, enrolled, now)
+        except RuntimeError as refusal:
+            # A busy Claude lock. The next message brings the next try.
+            line = "Not rotating: %s" % refusal
+            decision = "stay"
+
+    # Two herdr calls per pane, capped at five seconds each, is far too long to
+    # hold the lock every other pane is waiting on.
+    moved = _moved(decision, config.dry_run)
+    if moved:
+        tag_all(_name_of(enrolled, decision[1]), pinned=_pinned_labels(state_dir, accounts.load(paths, [])))
+    # A swap is an event and goes in every time. Everything else stands until
+    # something changes, and would repeat on every message of every pane.
+    if line and (moved or not _logged_last(state_dir, line)):
+        _log(state_dir, now, line)
+    return 0
+
+
+def failure(runtime=None, payload=None, detach=None):
+    """Claude's StopFailure hook: a turn ended on an API error. The status line
+    never runs for a request the server refused, so this is the only word grazr
+    gets that the account stopped answering. The hook is fire-and-forget, and
+    the rotation runs detached like `decide`, keyed to the account that was
+    live when the hook fired."""
+    payload = sys.stdin.read() if payload is None else payload
+    # Before the runtime: building one creates the accounts dir and reads config.
+    if managed_claude_home():
+        return 0
+    runtime = runtime or _runtime()
+    paths, _, state_dir, config = runtime
+    if not config.enabled:
+        return 0
+    try:
+        error = json.loads(payload).get("error")
+    except (ValueError, AttributeError):
+        return 0
+    if error not in BLOCKING_ERRORS and error != RATE_LIMIT_ERROR:
+        return 0
+    pinned = os.environ.get(pins.ENV_PIN)
+    if pinned:
+        # The pinned account failed, not the shared one, and a pin never moves.
+        name = _name_of(accounts.load(paths, []), pinned)
+        _announce_once(
+            state_dir, "pinned-failed:%s:%s" % (pinned, error),
+            "grazr: pinned %s failed" % name,
+            "It answered %s. Its agent stays on it; pin it elsewhere to move it" % error,
+        )
+        return 0
+    active = claude.active_account(paths)
+    if active is None:
+        return 0
+    (detach or (lambda: _detach_recover(state_dir, error, active)))()
+    return 0
+
+
+def _detach_recover(state_dir, error, active):
+    with open(os.path.join(state_dir, LOG), "a") as log:
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "recover", error, active],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log,
+            start_new_session=True,
+        )
+
+
+def recover(runtime=None, error=None, failed=None, now=None):
+    """Take the account that failed out of rotation and move on.
+
+    Every pane and teammate on that account fails together, so only the first
+    acts: the rest find another account live, or the one that failed arrived a
+    moment ago and their requests were already out before it did. Unlike
+    `decide`, this waits for the lock, since no later message brings a retry."""
+    if managed_claude_home():
+        return 0
+    runtime = runtime or _runtime()
+    paths, store, state_dir, config = runtime
+    now = now or datetime.now(timezone.utc)
+    if error not in BLOCKING_ERRORS and error != RATE_LIMIT_ERROR:
+        return 0
+    everyone = accounts.load(paths, [])
+    with _file_lock(os.path.join(state_dir, "rotate.lock"), wait=True):
+        active = claude.active_account(paths)
+        if active is None or active != failed or _recently_arrived(state_dir, active, now):
+            return 0
+        reason = "%s failed with %s" % (_name_of(everyone, active), error)
+        limits = _latest_reading(paths, active)
+        if error == RATE_LIMIT_ERROR:
+            limits, pinned = _mark_spent(paths, state_dir, active, limits, now)
+        else:
+            _block(state_dir, active, error, limits, now)
+            pinned = False
+        enrolled = _bound(
+            _usable(state_dir, accounts.load(paths, config.accounts), active, now, config),
+            _models_in_use(state_dir, now),
+        )
+        decision = _after_failure(limits, active, enrolled, now, config.thresholds, pinned)
+        if isinstance(decision, tuple):
+            override = claude.settings_auth_override(paths.config_dir)
+            if override:
+                decision = ("override", override)
+        if decision == "unenrolled":
+            # The others may exist and be refused too, so "enrol a second
+            # account" would send you the wrong way.
+            line = "%s, and no other account can take over" % reason
+            if not _announce_once(state_dir, "failed:%s:%s" % (active, error), "grazr: nowhere to go", line):
+                line = None
+        else:
+            try:
+                line = act_on(decision, runtime, active, limits, enrolled, now, why=" after %s" % error)
+            except RuntimeError as refusal:
+                line = "%s. Not rotating: %s" % (reason, refusal)
+                decision = "stay"
+
+    moved = _moved(decision, config.dry_run)
+    if moved:
+        tag_all(_name_of(everyone, decision[1]), pinned=_pinned_labels(state_dir, everyone))
+    if line and (moved or not _logged_last(state_dir, line)):
+        _log(state_dir, now, line)
+    return 0
+
+
+def _after_failure(limits, active, enrolled, now, thresholds, pinned):
+    """Where to go from an account the server refused. A rate limit pinned to a
+    window is an ordinary reading below the threshold, so the usual decision
+    holds, fallback margin and all. An account that refuses outright is worse
+    than any that answers, so the one with the most left takes over even
+    without headroom."""
+    if pinned:
+        return core.decide(limits, active, enrolled, now, thresholds)
+    chosen = core.next_account(active, enrolled, now, thresholds)
+    if chosen is None:
+        best = core.most_left(active, enrolled, now, thresholds)
+        chosen = best.id if best else None
+    return ("rotate", chosen) if chosen else "unenrolled"
+
+
+def _record_arrival(state_dir, identifier, now):
+    try:
+        atomic.write(
+            os.path.join(state_dir, LAST_ROTATION),
+            json.dumps({"to": identifier, "at": now.timestamp()}),
+        )
+    except OSError:
+        pass
+
+
+def _recently_arrived(state_dir, identifier, now):
+    try:
+        with open(os.path.join(state_dir, LAST_ROTATION)) as handle:
+            arrival = json.load(handle)
+        return (
+            arrival["to"] == identifier
+            and now.timestamp() - float(arrival["at"]) < FAILURE_GRACE_SECONDS
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _read_blocked(state_dir, now):
+    """Accounts the server refused, minus any whose wait has run out."""
+    try:
+        with open(os.path.join(state_dir, BLOCKED)) as handle:
+            blocked = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(blocked, dict):
+        return {}
+    return {
+        identifier: entry
+        for identifier, entry in blocked.items()
+        if isinstance(entry, dict)
+        and not (isinstance(entry.get("until"), (int, float)) and entry["until"] <= now.timestamp())
+    }
+
+
+def _block(state_dir, identifier, reason, limits, now, until=None):
+    with _file_lock(os.path.join(state_dir, BLOCKED_LOCK), wait=True):
+        blocked = _read_blocked(state_dir, now)
+        blocked[identifier] = {
+            "reason": reason,
+            "at": now.timestamp(),
+            "until": until.timestamp() if until else None,
+            # What the account showed when it failed, so a later reading can
+            # prove it answers again.
+            "reading": accounts.snapshot_to_json(limits),
+        }
+        atomic.write(os.path.join(state_dir, BLOCKED), json.dumps(blocked))
+
+
+def _unblock(state_dir, identifier, now):
+    """Whether there was anything to lift."""
+    with _file_lock(os.path.join(state_dir, BLOCKED_LOCK), wait=True):
+        blocked = _read_blocked(state_dir, now)
+        if blocked.pop(identifier, None) is None:
+            return False
+        atomic.write(os.path.join(state_dir, BLOCKED), json.dumps(blocked))
+        return True
+
+
+def _usable(state_dir, enrolled, active, now, config=None):
+    """Enrolled accounts grazr may move to. The active one stays in the list,
+    since the decision needs it, and a blocked account is never a target. With
+    PINNED_ROTATION=exclude, neither is one an agent is pinned to: that agent
+    has its quota to itself."""
+    blocked = _read_blocked(state_dir, now)
+    if config is not None and config.pinned_rotation == pins.EXCLUDE:
+        blocked = set(blocked) | pins.held(state_dir)
+    return [entry for entry in enrolled if entry.id == active or entry.id not in blocked]
+
+
+def _mark_spent(paths, state_dir, active, limits, now):
+    """A rate limit means a window ran out ahead of the reading on record. The
+    lowest open window is taken to be it and set to nothing, so the account
+    comes back on its own when that window resets. With no open window to pin
+    it to, the account waits a fixed time instead. Returns the reading and
+    whether a window holds the limit."""
+    windows = [
+        entry for entry in (limits if isinstance(limits, list) else [])
+        if entry.resets_at and entry.resets_at > now
+    ]
+    if not windows:
+        _block(
+            state_dir, active, RATE_LIMIT_ERROR, limits, now,
+            until=now + timedelta(seconds=RATE_LIMIT_FALLBACK_SECONDS),
+        )
+        return limits, False
+    lowest = min(windows, key=lambda entry: (entry.remaining, entry.resets_at))
+    spent = [entry._replace(remaining=0) if entry is lowest else entry for entry in limits]
+    with _file_lock(os.path.join(state_dir, "readings.lock"), wait=True):
+        accounts.record_snapshot(paths, active, spent)
+    return spent, True
+
+
+def _unblock_if_answering(state_dir, active, reported, enrolled, now):
+    """A status line only carries usage from an answered request. Usage below
+    what the account showed when it failed, or a window newer than any it
+    had, means it serves requests again. An unchanged reading proves nothing:
+    a pane repeats its last figures after a refusal too."""
+    entry = _read_blocked(state_dir, now).get(active)
+    if not entry or entry.get("until"):
+        return
+    before = accounts.snapshot_from_json(entry.get("reading")) or []
+    if not _used_since(before, reported):
+        return
+    if _unblock(state_dir, active, now):
+        _log(state_dir, now, "%s answers again, so grazr uses it again" % _name_of(enrolled, active))
+
+
+def _used_since(before, reported):
+    def window(entry):
+        return entry.group, entry.scope, entry.resets_at.replace(microsecond=0)
+
+    recorded = {window(entry): entry.remaining for entry in before if entry.resets_at}
+    for entry in reported:
+        if not entry.resets_at:
+            continue
+        key = window(entry)
+        if key in recorded:
+            if entry.remaining < recorded[key]:
+                return True
+            continue
+        known = [resets for group, scope, resets in recorded if (group, scope) == key[:2]]
+        if known and key[2] > max(known):
+            return True
+    return False
+
+
+def _latest_reading(paths, active):
+    return next((entry.snapshot for entry in accounts.load(paths, []) if entry.id == active), None)
+
+
+def _previous_bar(state_dir, payload, spawn):
+    try:
+        with open(os.path.join(state_dir, PREVIOUS_STATUSLINE)) as handle:
+            command = (json.load(handle)["previous"] or {}).get("command")
+    except (OSError, ValueError, KeyError, AttributeError):
+        return ""
+    if not command or claude.runs_grazr(command):
+        # A bar that calls grazr itself would call this shim back: a chain
+        # of shells on every message until the host stalls.
+        return ""
+    try:
+        return spawn(
+            command, shell=True, input=payload, capture_output=True, text=True,
+            timeout=STATUSLINE_TIMEOUT_SECONDS,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
+def _left_behind(limits, active, enrolled):
+    """A session keeps reporting the account it left until its next request.
+    Such a reading shows that account's windows, by reset time. When the active
+    account's own windows reset at other times, that alone tells the reading is
+    not its, whatever headroom it shows: the last message before the swap can
+    tick the parked figure a shade lower. Headroom only decides it when the
+    active account could be the source, since two accounts can share a reset."""
+    windows = {
+        (entry.group, entry.resets_at.replace(microsecond=0)): entry.remaining
+        for entry in limits
+        if entry.resets_at and entry.scope is None
+    }
+    if not windows:
+        return False
+    active_resets = {
+        (item.group, item.resets_at.replace(microsecond=0))
+        for entry in enrolled
+        if entry.id == active and isinstance(entry.snapshot, list)
+        for item in entry.snapshot
+        if item.resets_at and item.scope is None
+    }
+    could_be_active = not active_resets or bool(active_resets & set(windows))
+    for entry in enrolled:
+        if entry.id == active or not isinstance(entry.snapshot, list):
+            continue
+        parked = {
+            (item.group, item.resets_at.replace(microsecond=0)): item.remaining
+            for item in entry.snapshot
+            if item.resets_at and item.scope is None
+        }
+        if not all(window in parked for window in windows):
+            continue
+        if not could_be_active or all(
+            remaining >= parked[window] for window, remaining in windows.items()
+        ):
+            return True
+    return False
+
+
+def _log(state_dir, now, line):
+    with open(os.path.join(state_dir, LOG), "a") as handle:
+        handle.write("%s %s\n" % (now.astimezone().strftime("%Y-%m-%d %H:%M:%S"), line))
+
+
+def _logged_last(state_dir, line):
+    """Whether the log already ends with this line, timestamp aside."""
+    try:
+        with open(os.path.join(state_dir, LOG)) as handle:
+            return handle.read().rstrip("\n").rsplit("\n", 1)[-1].endswith(" " + line)
+    except OSError:
+        return False
+
+
+def _rotation_lock(state_dir):
+    """One pane at a time past the threshold. Several panes go idle together
+    when a long turn ends, and each would otherwise park over the others."""
+    return _file_lock(os.path.join(state_dir, "rotate.lock"))
+
+
+@contextlib.contextmanager
+def _file_lock(path, wait=False):
+    # "w" would truncate before flock is even attempted, so a pane that goes on
+    # to lose the race still writes to the file.
+    handle = open(path, "a")
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except IOError:
+            yield False
+            return
+        yield True
+    finally:
+        handle.close()
+
+
+def main(argv):
+    try:
+        return _dispatch(argv)
+    except (KeyboardInterrupt, EOFError):
+        # A pane owns the terminal, so a traceback is the last thing to show.
+        print("\ncancelled")
+        return 130
+    except (RuntimeError, ValueError) as error:
+        # Every one of these is a refusal grazr raised on purpose -- a busy
+        # lock, an unreadable keychain, a credential too long to store, a
+        # config line it cannot parse -- and its message is the whole point.
+        print("grazr: %s" % error)
+        return 1
+
+
+def _dispatch(argv):
+    entry_points = {
+        "statusline": statusline, "decide": decide, "install": install, "uninstall": uninstall,
+        "status": status, "enrol": enrol, "swap": swap, "tag": tag, "failure": failure,
+        "refresh": refresh, "pins-install": pins_install, "pins-uninstall": pins_uninstall,
+        "notices-drain": notices_drain,
+    }
+    command = argv[1] if len(argv) > 1 else ""
+    if command == "install" and len(argv) == 3 and argv[2] == "--force":
+        # Takes over a status line or hook that belongs to another grazr.
+        return install(force=True)
+    # Commands with arguments, from the Accounts window or a script.
+    with_arguments = {
+        ("pin", 4): lambda: pin(pane_id=argv[2], target=argv[3]),
+        ("unpin", 3): lambda: unpin(pane_id=argv[2]),
+        ("token", 3): lambda: token(target=argv[2]),
+        ("token-forget", 3): lambda: token_forget(target=argv[2]),
+        ("set", 4): lambda: set_setting(argv[2], argv[3]),
+    }
+    if (command, len(argv)) in with_arguments:
+        return with_arguments[(command, len(argv))]()
+    status_flags = {"--json": ("as_json", True), "--no-wait": ("wait", False)}
+    if command == "status" and len(argv) > 2 and all(flag in status_flags for flag in argv[2:]):
+        # The Orca plugin reads the report as JSON, and never waits on a key.
+        return status(**dict(status_flags[flag] for flag in argv[2:]))
+    if command == "enrol" and len(argv) > 2:
+        # Without a terminal: the Orca plugin signs in, then enrols the result here.
+        options = _enrol_flags(argv[2:])
+        if options is None:
+            print(ENROL_USAGE, file=sys.stderr)
+            return 2
+        return enrol_noninteractive(**options)
+    if command == "login-export" and len(argv) == 4 and argv[2] == "--from":
+        return login_export(from_dir=argv[3])
+    if command == "login-discard" and len(argv) == 4 and argv[2] == "--from":
+        return login_discard(from_dir=argv[3])
+    if command == "recover" and len(argv) == 4:
+        # Detached from the failure hook, with the error and the account it hit.
+        return recover(error=argv[2], failed=argv[3])
+    if command == "swap" and len(argv) == 3:
+        # A named account, from a script or another client. The action passes none.
+        return swap(target=argv[2])
+    if (command not in entry_points or (command == "install" and len(argv) != 2)
+            or (command == "status" and len(argv) > 2)):
+        print("usage: grazr.py %s" % "|".join(
+            list(entry_points) + ["install --force", "pin PANE ACCOUNT", "unpin PANE", "token ACCOUNT",
+                                  "token-forget ACCOUNT", "set ACCOUNTS|PINNED_ROTATION|ENABLED VALUE",
+                                  "enrol --from DIR|--stdin --name NAME [--expect-email EMAIL] [--json]",
+                                  "login-export --from DIR", "login-discard --from DIR"]
+        ), file=sys.stderr)
+        return 2
+    return entry_points[command]()
+
+
+def notices_drain(runtime=None):
+    """Print the queued notices and empty the queue, for the Orca plugin to
+    turn into OS notifications. Printing comes before the truncate, so a failed
+    print leaves the notices queued for the next drain instead of losing them.
+    """
+    state_dir = runtime.state_dir if runtime else _state_dir()
+    path = os.path.join(state_dir, NOTICES_QUEUE)
+    try:
+        with _file_lock(os.path.join(state_dir, NOTICES_QUEUE_LOCK), wait=True) as held:
+            if not held:
+                return 0
+            try:
+                with open(path) as handle:
+                    queued = handle.read()
+            except OSError:
+                return 0
+            if queued:
+                sys.stdout.write(queued)
+                # A broken pipe surfaces here, before the truncate, so the notices stay queued.
+                sys.stdout.flush()
+                atomic.write(path, "")
+    except OSError as error:
+        print("grazr: notices: %s" % error, file=sys.stderr)
+        return 1
+    return 0
+
+
+def tag(runtime=None):
+    """Name the account being spent. The pane event carries a pane id and tags
+    that pane, so a new pane is not blank until the next rotation. The action
+    carries none and tags every pane, which is what you press after adding the
+    sidebar row. A pane start is also when to notice that the status line is no
+    longer grazr's, since without it grazr sees nothing."""
+    paths, _, state_dir, _ = runtime or _runtime()
+    enrolled = accounts.load(paths, [])
+    # Pane identity seam: Orca's equivalent is ORCA_PANE_KEY (pins under Orca, later).
+    pane_id = os.environ.get("HERDR_PANE_ID")
+    pinned = _pinned_labels(state_dir, enrolled)
+    _refresh_shim(state_dir)
+    if pane_id and pane_id in pinned:
+        tag_pane(pane_id, pinned[pane_id])
+        return 0
+    active = claude.active_account(paths)
+    if active is None:
+        return 0
+    named = _name_of(enrolled, active)
+    if pane_id:
+        tag_pane(pane_id, named)
+    else:
+        pins.prune(state_dir, _live_panes())
+        tag_all(named, pinned=pinned)
+    if not claude.statusline_installed(paths.config_dir, _record_path(state_dir), state_dir):
+        line = "The status line is not grazr's, so grazr sees no usage. Run the connect action"
+        if _announce_once(state_dir, "statusline-missing", "grazr: status line not connected", line):
+            print(line)
+    return 0
+
+
+def install(runtime=None, force=False):
+    paths, _, state_dir, _ = runtime or _runtime()
+    shim = _shim_command(state_dir)
+    hook = _failure_command(state_dir)
+    # Checked before either slot is written, and never forced: the bar stays, so the hook must not move.
+    bar = claude.foreign_bar(paths.config_dir, shim)
+    if bar:
+        print("grazr: %s" % (FOREIGN_BAR_REFUSAL % bar))
+        return 1
+    other = claude.foreign_owner(paths.config_dir, shim, hook)
+    if other and not force:
+        print("grazr: %s" % (FOREIGN_OWNER_REFUSAL % other))
+        return 1
+    print(claude.install_statusline(paths.config_dir, _record_path(state_dir), shim, force=force))
+    print(claude.install_failure_hook(paths.config_dir, hook, force=force))
+    return 0
+
+
+def uninstall(runtime=None):
+    paths, _, state_dir, _ = runtime or _runtime()
+    print(claude.uninstall_statusline(paths.config_dir, _record_path(state_dir)))
+    print(claude.uninstall_failure_hook(paths.config_dir, _failure_command(state_dir)))
+    return 0
+
+
+def _record_path(state_dir):
+    return os.path.join(state_dir, PREVIOUS_STATUSLINE)
+
+
+def _shim_command(state_dir, entry="statusline"):
+    """The status line runs in Claude's environment, not herdr's, so the
+    command carries the directories herdr would have set. A host that sets
+    GRAZR_STATE_DIR gets that pair instead, and the notifier choice rides
+    along, since decide and recover inherit it from this command."""
+    config_dir = shlex.quote(os.path.dirname(_config_path()))
+    if os.environ.get("GRAZR_STATE_DIR"):
+        pair = "GRAZR_STATE_DIR=%s GRAZR_CONFIG_DIR=%s" % (shlex.quote(state_dir), config_dir)
+    else:
+        pair = "HERDR_PLUGIN_STATE_DIR=%s HERDR_PLUGIN_CONFIG_DIR=%s" % (
+            shlex.quote(state_dir),
+            config_dir,
+        )
+    notifier = os.environ.get("GRAZR_NOTIFIER")
+    if notifier:
+        pair += " GRAZR_NOTIFIER=%s" % shlex.quote(notifier)
+    return "%s python3 %s %s" % (pair, shlex.quote(os.path.abspath(__file__)), entry)
+
+
+def _failure_command(state_dir):
+    """The StopFailure hook runs in Claude's environment too."""
+    return _shim_command(state_dir, "failure")
+
+
+def swap(runtime=None, target=None):
+    """A swap the user asked for, from a Herdr key. The active account's
+    headroom is not consulted, and ENABLED gates the status line only.
+
+    `target` names the account to move to, by name or id, instead of letting
+    grazr pick. Naming it is the choice, so it is taken from every enrolled
+    account, listed in ACCOUNTS or not, and its headroom is not consulted
+    either."""
+    home = managed_claude_home()
+    if home:
+        return _refuse_managed(home)
+    runtime = runtime or _runtime()
+    paths, store, state_dir, config = runtime
+    now = datetime.now(timezone.utc)
+    with _rotation_lock(state_dir) as acquired:
+        if not acquired:
+            return _refuse_swap("Busy rotating already, try again in a moment")
+        active = claude.active_account(paths)
+        if active is None:
+            return _refuse_swap("Not logged in, nothing to swap from")
+        limits = _latest_reading(paths, active)
+        if target is not None:
+            enrolled = accounts.load(paths, [])
+            next_id = next(
+                (entry.id for entry in enrolled if target in (entry.name, entry.id)), None
+            )
+            if next_id is None:
+                return _refuse_swap("No enrolled account is named %s" % target)
+            if next_id == active:
+                return _refuse_swap("Already on %s" % _name_of(enrolled, active))
+            # Its login was refused, so moving there hands Claude a dead account.
+            refused = _read_blocked(state_dir, now).get(next_id)
+            if refused:
+                return _refuse_swap(
+                    "%s failed with %s, enrol it again first"
+                    % (_name_of(enrolled, next_id), refused.get("reason") or "an error")
+                )
+            if config.pinned_rotation == pins.EXCLUDE and next_id in pins.held(state_dir):
+                return _refuse_swap(
+                    "%s is pinned to an agent, and PINNED_ROTATION=exclude keeps it to that agent"
+                    % _name_of(enrolled, next_id)
+                )
+        else:
+            enrolled = _bound(
+                _usable(state_dir, accounts.load(paths, config.accounts), active, now, config),
+                _models_in_use(state_dir, now),
+            )
+            next_id = core.next_account(active, enrolled, now, config.thresholds)
+        if next_id is None:
+            # The account you are on is never a swap target, so its reset says
+            # nothing about when this key does something.
+            candidates = {
+                entry.id: entry.snapshot for entry in enrolled if entry.id != active
+            }
+            return _refuse_swap(
+                "Nothing to swap to, earliest reset %s"
+                % _earliest_reset(now, config.thresholds, candidates, enrolled)
+            )
+        decision = ("rotate", next_id)
+        try:
+            line = act_on(decision, runtime, active, limits, enrolled, now)
+        except RuntimeError as refusal:
+            return _refuse_swap(str(refusal))
+        print(line)
+
+    if _moved(decision, config.dry_run):
+        tag_all(_name_of(enrolled, next_id), pinned=_pinned_labels(state_dir, accounts.load(paths, [])))
+    _log(state_dir, now, line)
+    return 0
+
+
+def _refuse_managed(home):
+    print("grazr: this terminal %s" % (MANAGED_NOTICE % home))
+    return 1
+
+
+def _refuse_swap(reason):
+    """The user pressed a key and is watching, so a refusal goes to the screen
+    as well as the log."""
+    print("grazr: %s" % reason)
+    notify("grazr: no swap", reason)
+    return 1
+
+
+def status_report(runtime, now=None):
+    """Everything `status` shows, as data. The Orca plugin reads it over a pipe,
+    so every key is present, None where a value is unknown, and nothing here
+    waits on a key press."""
+    paths, store, state_dir, config = runtime
+    now = now or datetime.now(timezone.utc)
+    active = claude.active_account(paths)
+    everyone = accounts.load(paths, [])
+    enrolled_ids = {entry.id for entry in everyone}
+    ordered_ids = {entry.id for entry in accounts.load(paths, config.accounts)}
+    blocked = _read_blocked(state_dir, now)
+    statusline = claude.statusline_installed(paths.config_dir, _record_path(state_dir), state_dir)
+    failure_hook = claude.failure_hook_installed(paths.config_dir, _failure_command(state_dir))
+    last = _last_rotation(state_dir)
+    live_oauth = _live_oauth(paths)
+    return {
+        "installed": statusline and failure_hook,
+        "connection": {
+            "statusline": statusline,
+            "failure_hook": failure_hook,
+            "foreign": {
+                "statusline": claude.foreign_statusline(paths.config_dir, _shim_command(state_dir)),
+                "failure_hook": claude.foreign_failure_hook(paths.config_dir, _failure_command(state_dir)),
+            },
+        },
+        "active": None if active is None else {
+            "id": active,
+            "name": _name_of(everyone, active),
+            "enrolled": active in enrolled_ids,
+            "in_order": active in ordered_ids,
+        },
+        "accounts": [
+            {
+                "id": entry.id,
+                "name": entry.name,
+                "email": _email_of(paths, entry.id),
+                "organization": _organization_of(paths, entry.id),
+                "plan": _account_plan(paths, entry.id, active, live_oauth),
+                "parked":accounts.has_parked_credential(store, entry.id),
+                "snapshot": accounts.snapshot_to_json(entry.snapshot),
+                "blocked": blocked[entry.id].get("reason") if entry.id in blocked else None,
+                "in_order": entry.id in ordered_ids,
+                "first_reading_due": accounts.first_reading_due(paths, entry.id),
+                "updated": accounts.updated_at(paths, entry.id),
+            }
+            for entry in everyone
+        ],
+        "order": list(config.accounts),
+        "settings": {
+            "thresholds": config.thresholds,
+            "enabled": config.enabled,
+            "dry_run": config.dry_run,
+            "model_limits": config.model_limits,
+            "parked_poll_minutes": config.parked_poll_minutes,
+            "pinned_rotation": config.pinned_rotation,
+            "config_path": _config_path(),
+            "state_dir": state_dir,
+            # Same fallback as notify, so an empty GRAZR_NOTIFIER reads as Herdr there too.
+            "notifier": os.environ.get("GRAZR_NOTIFIER") or "herdr",
+        },
+        "blocked": {
+            identifier: {"reason": entry.get("reason"), "at": entry.get("at"), "until": entry.get("until")}
+            for identifier, entry in blocked.items()
+        },
+        "changed_at": last["at"] if last else None,
+        "last_rotation": last,
+        "last_reported": _last_decision(state_dir),
+        "managed_profile": managed_claude_home(),
+        "version": VERSION,
+    }
+
+
+def _email_of(paths, identifier):
+    try:
+        oauth = accounts.read(paths, identifier).get("oauthAccount")
+    except (OSError, ValueError):
+        return None
+    email = oauth.get("emailAddress") if isinstance(oauth, dict) else None
+    return email if isinstance(email, str) else None
+
+
+def _organization_of(paths, identifier):
+    try:
+        organization = accounts.read(paths, identifier).get("organization")
+    except (OSError, ValueError):
+        return None
+    return organization if isinstance(organization, str) else None
+
+
+def _live_oauth(paths):
+    """The live `oauthAccount` in Claude's config file, None when the file is
+    missing, unreadable or lacks it. Read once per report."""
+    try:
+        with open(paths.config_path) as handle:
+            oauth = json.load(handle).get("oauthAccount")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return oauth if isinstance(oauth, dict) else None
+
+
+def _plan_of(oauth):
+    """The plan Claude's OAuth profile names, or None without an organizationType."""
+    if not isinstance(oauth, dict) or not oauth.get("organizationType"):
+        return None
+    return {
+        "type": oauth["organizationType"],
+        "tier": oauth.get("organizationRateLimitTier"),
+        "seat_tier": oauth.get("userRateLimitTier"),
+    }
+
+
+def _account_plan(paths, identifier, active_id, live_oauth):
+    """The active account's live profile when it names a plan, else the stored
+    record's. Other accounts report the stored record's plan."""
+    if identifier == active_id:
+        live = _plan_of(live_oauth)
+        if live is not None:
+            return live
+    try:
+        oauth = accounts.read(paths, identifier).get("oauthAccount")
+    except (OSError, ValueError):
+        return None
+    return _plan_of(oauth)
+
+
+def _last_rotation(state_dir):
+    """The account the last swap moved to and when it landed, or None before any swap."""
+    try:
+        with open(os.path.join(state_dir, LAST_ROTATION)) as handle:
+            arrival = json.load(handle)
+        return {"to": arrival["to"], "at": float(arrival["at"])}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def status(runtime=None, as_json=False, wait=True):
+    runtime = runtime or _runtime()
+    if as_json:
+        # The Orca plugin reads this over a pipe, so nothing else is printed.
+        print(json.dumps(status_report(runtime), indent=2, sort_keys=True))
+        return 0
+    paths, store, state_dir, config = runtime
+    active = claude.active_account(paths)
+
+    print("config: %s" % _config_path())
+    print("thresholds: session %d%% / weekly %d%% remaining%s\n"
+          % (config.thresholds["session"], config.thresholds["weekly"],
+             "   DRY_RUN" if config.dry_run else ""))
+    home = managed_claude_home()
+    if home:
+        print("  This terminal %s\n" % (MANAGED_NOTICE % home))
+
+    enrolled = accounts.load(paths, config.accounts)
+    blocked = _read_blocked(state_dir, datetime.now(timezone.utc))
+    for account in enrolled:
+        marker = "*" if account.id == active else " "
+        parked = "parked" if accounts.has_parked_credential(store, account.id) else "NO CREDENTIAL"
+        print("%s %-16s %-14s %s" % (marker, account.name, parked, _describe(account.snapshot)))
+        if account.id in blocked:
+            print("  %-16s %s" % ("", _describe_blocked(blocked[account.id])))
+
+    for name in config.accounts:
+        if not any(account.name == name for account in enrolled):
+            print("  %-16s not enrolled, so it is never used" % name)
+
+    print("\nactive account headroom: %s" % _describe(_latest_reading(paths, active)))
+    if not claude.statusline_installed(paths.config_dir, _record_path(state_dir), state_dir):
+        other = claude.foreign_statusline(paths.config_dir, _shim_command(state_dir))
+        if other and claude.foreign_bar(paths.config_dir, _shim_command(state_dir)):
+            print("  The status line is your own bar, and it runs another grazr (state in %s). Edit the bar by hand" % other)
+        elif other:
+            print("  The status line belongs to another grazr (state in %s); %s" % (other, TAKEOVER_HINT))
+        else:
+            print("  The status line is not grazr's, so grazr sees no usage. Run the connect action")
+    if not claude.failure_hook_installed(paths.config_dir, _failure_command(state_dir)):
+        other = claude.foreign_failure_hook(paths.config_dir, _failure_command(state_dir))
+        if other:
+            print("  The failure hook belongs to another grazr (state in %s); %s" % (other, TAKEOVER_HINT))
+        else:
+            print("  The failure hook is not connected, so an account the server refuses stays put. Run the connect action")
+    if active and not any(account.id == active for account in enrolled):
+        # Enrolled but left out of ACCOUNTS is the likelier mistake, and calling
+        # that "not enrolled" sends you off to enrol it a second time.
+        if any(account.id == active for account in accounts.load(paths, [])):
+            print("  This login is enrolled but missing from ACCOUNTS, so grazr can rotate away but not back")
+        else:
+            print("  This login is not enrolled, so only the swap key moves off it. Enrol it to rotate on its own")
+
+    pinned = pins.load(state_dir)
+    if pinned:
+        everyone = accounts.load(paths, [])
+        print("\npinned agents (%s from the rotation):" % (
+            "kept" if config.pinned_rotation == pins.KEEP else "excluded"))
+        for pane, entry in sorted(pinned.items()):
+            wanted, running = entry.get("account"), entry.get("running")
+            line = "  %-10s %s" % (pane, _name_of(everyone, wanted) if wanted else "unpinned")
+            if running and running != wanted:
+                line += "  (still running on %s until Claude restarts)" % _name_of(everyone, running)
+            print(line)
+
+    last = _last_decision(state_dir)
+    if last:
+        print("\nlast reported: %s" % last)
+    if not wait:
+        print("\n(* = active)")
+        return 0
+    print("\n(* = active)   press any key to close")
+    read_key()
+    return 0
+
+
+def _describe_blocked(entry):
+    def clock(stamp):
+        return datetime.fromtimestamp(stamp, timezone.utc).astimezone().strftime("%a %H:%M")
+
+    since = clock(entry["at"]) if isinstance(entry.get("at"), (int, float)) else "unknown"
+    if isinstance(entry.get("until"), (int, float)):
+        return "FAILED %s at %s, skipped until %s" % (entry.get("reason"), since, clock(entry["until"]))
+    return "FAILED %s at %s, skipped until enrolled again or seen answering" % (entry.get("reason"), since)
+
+
+def _last_decision(state_dir):
+    notices = _read_notices(state_dir)
+    if not notices:
+        return None
+    key, notified = list(notices.items())[-1]
+    return "%s%s" % (key, "" if notified else "  (toast never appeared)")
+
+
+def _describe(snapshot):
+    if snapshot is None:
+        return "no reading yet"
+    return ", ".join(
+        "%s %d%% left" % ("%s weekly" % entry.scope if entry.scope else entry.kind, entry.remaining)
+        for entry in snapshot
+    ) or "no limits reported"
+
+
+def enrol(runtime=None):
+    home = managed_claude_home()
+    if home:
+        return _refuse_managed(home)
+    # No title here: the pane border already carries it.
+    print("  (s) Save the login this machine is using now")
+    print("  (l) Log in to another account, without touching the current one")
+    print("  (q) Close, or press Esc\n")
+    print("choice: ", end="", flush=True)
+    choice = read_key()
+    print(choice if choice in ("s", "l") else "")
+    if choice not in ("s", "l"):
+        print("Closed, nothing changed")
+        return 0
+
+    runtime = runtime or _runtime()
+    paths = runtime.paths
+    if choice == "s":
+        return _enrol_from(runtime, None)
+
+    source = os.path.abspath(
+        os.path.join(paths.accounts_dir, "..", "enrol-%d" % os.getpid())
+    )
+    os.makedirs(source, mode=0o700, exist_ok=True)
+    # Everything after the directory exists is inside the try: an abort at the
+    # browser step or the name prompt would otherwise strand a real credential
+    # in the keychain under a service name nothing tracks.
+    try:
+        print("\nLogging in with an isolated config dir, so your current login is untouched.\n")
+        try:
+            login = subprocess.run(
+                ["claude", "auth", "login"], env=dict(os.environ, CLAUDE_CONFIG_DIR=source)
+            )
+        except FileNotFoundError:
+            print("There is no claude on this pane's PATH, so it cannot log you in")
+            return 1
+        if login.returncode != 0:
+            print("Login did not complete")
+            return 1
+        return _enrol_from(runtime, source)
+    finally:
+        if not claude.discard_isolated_login(runtime.store, source):
+            print("Warning: could not remove the throwaway login from the keychain")
+
+
+def _enrol_from(runtime, source):
+    paths, store, state_dir, _ = runtime
+    name = input("account name: ").strip()
+    if not name:
+        print("A name is required")
+        return 1
+    try:
+        identifier = _enrol_between_rotations(runtime, name, source)
+    except RuntimeError as error:
+        print("Could not enrol: %s" % error)
+        return 1
+    print("\nEnrolled %s as %s" % (name, identifier))
+    if _unblock(state_dir, identifier, datetime.now(timezone.utc)):
+        print("It had failed before, and is back in rotation")
+    print('Add it to ACCOUNTS in %s' % _config_path())
+    # Checked before either slot is written, so a split between two grazrs never happens.
+    shim = _shim_command(state_dir)
+    hook = _failure_command(state_dir)
+    bar = claude.foreign_bar(paths.config_dir, shim)
+    if bar:
+        # Enrolling worked. The bar runs another grazr, and that bar is the user's to edit.
+        print("grazr: %s" % (FOREIGN_BAR_REFUSAL % bar))
+        return 0
+    other = claude.foreign_owner(paths.config_dir, shim, hook)
+    if other:
+        # Enrolling worked. The status line or hook is another grazr's to keep.
+        print("grazr: %s" % (FOREIGN_OWNER_REFUSAL % other))
+        return 0
+    try:
+        print(claude.install_statusline(paths.config_dir, _record_path(state_dir), shim))
+        print(claude.install_failure_hook(paths.config_dir, hook))
+    except RuntimeError as error:
+        # Enrolling worked. Settings that cannot be read are reported, not raised.
+        print("grazr: %s" % error)
+    return 0
+
+
+def _enrol_between_rotations(runtime, name, source):
+    """The live login is read in two parts, and a swap between them would park
+    one account's credential under the other's name. An isolated login is one
+    no swap touches."""
+    if source:
+        return claude.enrol(runtime.paths, runtime.store, name, source)
+    with _rotation_lock(runtime.state_dir) as acquired:
+        if not acquired:
+            raise RuntimeError("Busy rotating, try again in a moment")
+        return claude.enrol(runtime.paths, runtime.store, name, source)
+
+
+
+ENROL_USAGE = "usage: grazr.py enrol (--from DIR | --stdin) --name NAME [--expect-email EMAIL] [--json]"
+_ENROL_VALUE_FLAGS = {"--from": "from_dir", "--name": "name", "--expect-email": "expect_email"}
+_ENROL_SWITCHES = {"--stdin": "stdin", "--json": "as_json"}
+
+
+def _enrol_flags(arguments):
+    """The flags of a non-interactive `enrol`. None unless they make one whole
+    request: each flag once, a non-empty name, and exactly one login source.
+    An empty --expect-email is refused here, since it would check nothing."""
+    options = {"from_dir": None, "name": None, "expect_email": None, "stdin": False, "as_json": False}
+    seen = set()
+    index = 0
+    while index < len(arguments):
+        flag = arguments[index]
+        if flag in seen:
+            return None
+        if flag in _ENROL_SWITCHES:
+            options[_ENROL_SWITCHES[flag]] = True
+        elif flag in _ENROL_VALUE_FLAGS and index + 1 < len(arguments):
+            value = arguments[index + 1].strip()
+            if not value:
+                return None
+            options[_ENROL_VALUE_FLAGS[flag]] = value
+            index += 1
+        else:
+            return None
+        seen.add(flag)
+        index += 1
+    if not options["name"] or bool(options["from_dir"]) == options["stdin"]:
+        return None
+    return options
+
+
+def _read_import(text):
+    """The JSON that `login-export` printed, as read from stdin. A refusal says
+    what is missing, never what was there: the text holds a credential."""
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        raise RuntimeError("The login to import is not JSON")
+    identity = payload.get("identity") if isinstance(payload, dict) else None
+    blob = payload.get("blob") if isinstance(payload, dict) else None
+    if not isinstance(identity, dict) or not isinstance(blob, str) or not blob:
+        raise RuntimeError("The login to import has no identity or credential")
+    try:
+        credential = json.loads(blob)
+    except ValueError:
+        credential = None
+    if not isinstance(credential, dict) or not isinstance(credential.get("claudeAiOauth"), dict):
+        raise RuntimeError("The credential to import is not a Claude login")
+    return identity, blob
+
+
+def enrol_noninteractive(from_dir=None, stdin=False, name=None, expect_email=None, as_json=False, runtime=None):
+    """`enrol` with its answers as flags, so the Orca plugin can enrol a login
+    it signed in without a terminal. Same enrolment as the menu, without the
+    prompts; the install side of _enrol_from is not repeated here."""
+
+    def refuse(message):
+        if as_json:
+            print(json.dumps({"ok": False, "error": message}))
+        else:
+            print("grazr: %s" % message)
+        return 1
+
+    home = managed_claude_home()
+    if home:
+        return refuse("this terminal %s" % (MANAGED_NOTICE % home))
+    runtime = runtime or _runtime()
+    paths, store, state_dir, _ = runtime
+    if from_dir:
+        from_dir = os.path.abspath(from_dir)
+    try:
+        if stdin:
+            identity, blob = _read_import(sys.stdin.read())
+            # Same guard as the live login's enrol: a swap must not run between the import and its record.
+            with _rotation_lock(state_dir) as acquired:
+                if not acquired:
+                    raise RuntimeError("Busy rotating, try again in a moment")
+                identifier = claude.enrol_identity(paths, store, name, identity, blob, expect_email)
+        else:
+            # An isolated login is one no swap touches, so no rotation lock is needed.
+            identifier = claude.enrol(paths, store, name, from_dir, expect_email)
+    except (RuntimeError, ValueError, OSError) as error:
+        return refuse(str(error))
+    # The enrol has happened by now, so nothing after it may turn it into a traceback.
+    try:
+        email = accounts.read(paths, identifier).get("email")
+    except (OSError, ValueError, AttributeError):
+        email = None
+    try:
+        unblocked = _unblock(state_dir, identifier, datetime.now(timezone.utc))
+    except Exception:
+        unblocked = False
+    if as_json:
+        print(json.dumps({"ok": True, "id": identifier, "name": name, "email": email, "unblocked": unblocked}))
+    else:
+        print("Enrolled %s as %s" % (name, identifier))
+        if unblocked:
+            print("It had failed before, and is back in rotation")
+    return 0
+
+
+def login_export(from_dir=None, runtime=None):
+    """Print an isolated login as one JSON line, for the plugin to pipe into
+    `enrol --stdin` on another host. That line is the only output: the
+    credential goes to stdout and nowhere else."""
+    home = managed_claude_home()
+    if home:
+        print("grazr: this terminal %s" % (MANAGED_NOTICE % home), file=sys.stderr)
+        return 1
+    runtime = runtime or _runtime()
+    try:
+        exported = claude.export_isolated_login(runtime.store, os.path.abspath(from_dir))
+    except (RuntimeError, ValueError, OSError) as error:
+        print("grazr: %s" % error, file=sys.stderr)
+        return 1
+    print(json.dumps(exported))
+    return 0
+
+
+def login_discard(from_dir=None, runtime=None):
+    """Remove a throwaway login and its config dir. Exit 0 when nothing was
+    there, since that is the state the caller wanted."""
+    home = managed_claude_home()
+    if home:
+        print("grazr: this terminal %s" % (MANAGED_NOTICE % home), file=sys.stderr)
+        return 1
+    runtime = runtime or _runtime()
+    if claude.discard_isolated_login(runtime.store, os.path.abspath(from_dir)):
+        return 0
+    print("grazr: could not remove the throwaway login from the keychain", file=sys.stderr)
+    return 1
+
+
+# Pinning an agent to an account. See pins.py.
+
+SHIM_LIB = ("pins.py", "stores.py", "atomic.py")
+RC_BEGIN = "# >>> grazr: pinned agents >>>"
+RC_END = "# <<< grazr: pinned agents <<<"
+TOKEN_PREFIX = "sk-ant-oat01-"
+
+
+def _account_named(enrolled, target):
+    return next((entry for entry in enrolled if target in (entry.name, entry.id)), None)
+
+
+def pin(runtime=None, pane_id=None, target=None):
+    """Pin a Herdr pane to an account. Claude there moves at its next start,
+    since a running process cannot be handed another login."""
+    runtime = runtime or _runtime()
+    paths, store, state_dir, config = runtime
+    now = datetime.now(timezone.utc)
+    enrolled = accounts.load(paths, [])
+    account = _account_named(enrolled, target)
+    if account is None:
+        print("grazr: no enrolled account is named %s" % target)
+        return 1
+    if not store.read_token(account.id) or pins.token_expired(state_dir, account.id, now):
+        print("grazr: %s has no current pin token. Set one up first: grazr.py token %s"
+              % (account.name, account.name))
+        return 1
+    pins.pin(state_dir, pane_id, account.id, now)
+    print("Pinned %s to %s. Claude in that pane moves to it when it next starts" % (pane_id, account.name))
+    if config.pinned_rotation == pins.EXCLUDE and claude.active_account(paths) == account.id:
+        # The shared rotation is on the account this agent now owns.
+        print("The other agents share %s now, so grazr moves them off it" % account.name)
+        swap(runtime)
+    return 0
+
+
+def unpin(runtime=None, pane_id=None):
+    runtime = runtime or _runtime()
+    if pins.unpin(runtime.state_dir, pane_id, datetime.now(timezone.utc)):
+        print("Unpinned %s. Claude there joins the shared rotation when it next starts" % pane_id)
+    else:
+        print("%s was not pinned" % pane_id)
+    return 0
+
+
+def token(runtime=None, target=None, verify=None, ask=None):
+    """Store an account's long-lived token for pinned agents. Claude makes it,
+    with `claude setup-token` in your browser; grazr only keeps it."""
+    runtime = runtime or _runtime()
+    paths, store, state_dir, _ = runtime
+    account = _account_named(accounts.load(paths, []), target)
+    if account is None:
+        print("grazr: no enrolled account is named %s" % target)
+        return 1
+    print("A pinned agent runs on a token of its own, which lasts a year.")
+    print("Sign in to claude.ai in your browser as %s, then let Claude make the token.\n" % account.name)
+    source = os.path.abspath(os.path.join(paths.accounts_dir, "..", "token-%d" % os.getpid()))
+    os.makedirs(source, mode=0o700, exist_ok=True)
+    try:
+        try:
+            subprocess.run(["claude", "setup-token"], env=dict(os.environ, CLAUDE_CONFIG_DIR=source))
+        except FileNotFoundError:
+            print("There is no claude on this pane's PATH, so it cannot make the token")
+            return 1
+    finally:
+        claude.discard_isolated_login(store, source)
+    pasted = (ask or getpass.getpass)("\nPaste the token it printed (it stays hidden): ").strip()
+    if not pasted.startswith(TOKEN_PREFIX):
+        print("That is not a Claude token (they start with %s), nothing stored" % TOKEN_PREFIX)
+        return 1
+    owner = (verify or claude.token_account)(pasted)
+    if owner is not None and owner.get("uuid") != account.id:
+        print("That token is for %s, not %s, so nothing was stored. Sign in as %s and try again"
+              % (owner.get("email") or "another account", account.name, account.name))
+        return 1
+    if owner is None:
+        print("Claude does not say whose token it is. Is it %s's? (y/n) " % account.name, end="", flush=True)
+        if read_key() != "y":
+            print("\nNothing stored")
+            return 1
+        print()
+    store.write_token(account.id, pasted)
+    pins.record_token(state_dir, account.id, datetime.now(timezone.utc))
+    print("Stored. Agents can now be pinned to %s" % account.name)
+    return 0
+
+
+def token_forget(runtime=None, target=None):
+    runtime = runtime or _runtime()
+    paths, store, state_dir, _ = runtime
+    account = _account_named(accounts.load(paths, []), target)
+    if account is None:
+        print("grazr: no enrolled account is named %s" % target)
+        return 1
+    store.discard_token(account.id)
+    pins.forget_token(state_dir, account.id)
+    print("Forgot %s's token. Its pinned agents fall back to the shared account at their next start" % account.name)
+    return 0
+
+
+SETTABLE = {"ACCOUNTS": None, "PINNED_ROTATION": pins.ROTATION_MODES, "ENABLED": ("0", "1")}
+
+
+def set_setting(key, value, path=None, enrolled=None):
+    """Change one setting in config.env, keeping every other line as it is."""
+    if key not in SETTABLE:
+        print("grazr: only %s can be set this way" % ", ".join(SETTABLE))
+        return 1
+    if key == "ACCOUNTS":
+        names = value.split()
+        if enrolled is None:
+            enrolled = [entry.name for entry in accounts.load(_paths()[0], [])]
+        unknown = [name for name in names if name not in enrolled]
+        if unknown:
+            print("grazr: ACCOUNTS names must be enrolled accounts: %s" % " ".join(unknown))
+            return 1
+        twice = [name for index, name in enumerate(names) if name in names[:index]]
+        if twice:
+            print("grazr: ACCOUNTS lists an account twice: %s" % twice[0])
+            return 1
+        value = " ".join(names)
+        written = '"%s"' % value
+    elif value not in SETTABLE[key]:
+        print("grazr: %s must be %s" % (key, " or ".join(SETTABLE[key])))
+        return 1
+    else:
+        written = value
+    path = path or _config_path()
+    load_config(path)
+    with open(path) as handle:
+        lines = handle.read().splitlines(True)
+    replaced = False
+    for index, line in enumerate(lines):
+        if line.split("=", 1)[0].strip() == key:
+            comment = line[line.index("#"):].rstrip("\n") if "#" in line else ""
+            lines[index] = ("%s=%s  %s" % (key, written, comment)).rstrip() + "\n"
+            replaced = True
+    if not replaced:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append("%s=%s\n" % (key, written))
+    atomic.write(path, "".join(lines))
+    print("%s=%s" % (key, value))
+    return 0
+
+
+def _shim_dirs(state_dir):
+    return os.path.join(state_dir, "bin"), os.path.join(state_dir, "lib")
+
+
+def _copy_shim(state_dir):
+    """Put the shim and the modules it needs into the state dir. Returns
+    whether anything changed."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    bin_dir, lib_dir = _shim_dirs(state_dir)
+    changed = False
+    for source, target, mode in [(os.path.join(here, "shim.py"), os.path.join(bin_dir, "claude"), 0o700)] + [
+        (os.path.join(here, name), os.path.join(lib_dir, name), 0o600) for name in SHIM_LIB
+    ]:
+        with open(source) as handle:
+            text = handle.read()
+        try:
+            with open(target) as handle:
+                if handle.read() == text:
+                    continue
+        except OSError:
+            pass
+        os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
+        atomic.write(target, text)
+        os.chmod(target, mode)
+        changed = True
+    return changed
+
+
+def _refresh_shim(state_dir):
+    """An update of grazr brings a new shim; an installed one follows it."""
+    if os.path.exists(os.path.join(_shim_dirs(state_dir)[0], "claude")):
+        try:
+            _copy_shim(state_dir)
+        except OSError:
+            pass
+
+
+def _shell_files():
+    """The shells' own startup files, which a Herdr pane's shell reads."""
+    home = os.path.expanduser("~")
+    found = [os.path.join(home, name) for name in (".zshrc", ".bashrc") if os.path.exists(os.path.join(home, name))]
+    if not found:
+        shell = os.path.basename(os.environ.get("SHELL") or "bash")
+        found = [os.path.join(home, ".zshrc" if shell == "zsh" else ".bashrc")]
+    return found
+
+
+def _without_block(text):
+    if RC_BEGIN not in text:
+        return text
+    before, _, rest = text.partition(RC_BEGIN)
+    _, _, after = rest.partition(RC_END)
+    return before.rstrip("\n") + ("\n" if before.strip() else "") + after.lstrip("\n")
+
+
+def _rc_block(bin_dir):
+    """Last in the file, so it lands ahead of everything put on PATH before it.
+    Any earlier copy goes first, so a nested shell keeps it in front."""
+    quoted = shlex.quote(bin_dir)
+    return "\n".join([
+        RC_BEGIN,
+        "# grazr: a Herdr pane runs Claude through this, so an agent pinned to an account stays on it.",
+        'if [ -n "$HERDR_PANE_ID" ]; then _grazr_bin=%s; '
+        'PATH="$_grazr_bin:${PATH//"$_grazr_bin:"/}"; export PATH; unset _grazr_bin; fi' % quoted,
+        RC_END,
+        "",
+    ])
+
+
+def _rewrite(path, text):
+    """A shell file in place, its mode kept. A symlinked one (a dotfiles repo)
+    is written where it points, so the link survives."""
+    path = os.path.realpath(path)
+    try:
+        mode = os.stat(path).st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o644
+    atomic.write(path, text)
+    os.chmod(path, mode)
+
+
+def pins_install(runtime=None):
+    """Install the shim pinned agents need, and put it on Herdr panes' PATH."""
+    _, _, state_dir, _ = runtime or _runtime()
+    _copy_shim(state_dir)
+    bin_dir = _shim_dirs(state_dir)[0]
+    for path in _shell_files():
+        try:
+            with open(path) as handle:
+                text = handle.read()
+        except FileNotFoundError:
+            text = ""
+        text = _without_block(text)
+        text = (text.rstrip("\n") + "\n\n" if text.strip() else "") + _rc_block(bin_dir)
+        _rewrite(path, text)
+        print("Added grazr's pinned-agents block to %s" % path)
+    print("New Herdr panes run Claude through %s. Panes already open pick it up in a new shell" % bin_dir)
+    return 0
+
+
+def pins_uninstall(runtime=None):
+    _, _, state_dir, _ = runtime or _runtime()
+    for path in _shell_files():
+        try:
+            with open(path) as handle:
+                text = handle.read()
+        except FileNotFoundError:
+            continue
+        if RC_BEGIN in text:
+            _rewrite(path, _without_block(text))
+            print("Removed grazr's pinned-agents block from %s" % path)
+    for directory in _shim_dirs(state_dir):
+        if os.path.isdir(directory):
+            for name in os.listdir(directory):
+                os.unlink(os.path.join(directory, name))
+            os.rmdir(directory)
+    print("Pinned agents run on the shared account from their next start")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

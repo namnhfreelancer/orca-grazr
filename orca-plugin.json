@@ -1,0 +1,45 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
+  "manifestVersion": 2,
+  "execution": "trusted-worker",
+  "id": "grazr",
+  "publisher": "senadaruc",
+  "name": "Grazr",
+  "version": "0.6.1",
+  "description": "Auto-rotates the System default Claude Code account across your hosts when a usage window is nearly spent (grazr engine), with OS toasts.",
+  "license": "MIT",
+  "repository": "https://github.com/senadaruc/orca-grazr",
+  "engines": { "orca": ">=1.4.245" },
+  "pluginApi": 1,
+  "main": "main.mjs",
+  "contributes": {
+    "commands": [
+      { "id": "target-next", "title": "Grazr: Target → next host" },
+      { "id": "status", "title": "Grazr: Status (all hosts)" },
+      { "id": "swap", "title": "Grazr: Swap now (target)" },
+      { "id": "refresh", "title": "Grazr: Refresh parked accounts (target)" },
+      { "id": "rotation-toggle", "title": "Grazr: Toggle rotation (target)" },
+      { "id": "install", "title": "Grazr: Install engine on target" },
+      { "id": "uninstall", "title": "Grazr: Uninstall from target" },
+      { "id": "drain-now", "title": "Grazr: Drain notices now" },
+      { "id": "enrol", "title": "Grazr: Type enrol command into terminal", "when": "workspace" },
+      { "id": "status-terminal", "title": "Grazr: Type status command into terminal", "when": "workspace" },
+      { "id": "panel-refresh", "title": "Grazr: Refresh panel" }
+    ],
+    "panels": [
+      { "id": "accounts", "title": "Claude Accounts", "icon": "gauge", "entry": "panel/accounts.html" }
+    ],
+    "events": [
+      { "on": "agent.status.changed" },
+      { "on": "workspace.created" }
+    ]
+  },
+  "capabilities": [
+    { "kind": "notifications:show" },
+    { "kind": "settings:own" },
+    { "kind": "storage:own" },
+    { "kind": "workspace:read" },
+    { "kind": "agent:read" },
+    { "kind": "terminal:send" }
+  ]
+}

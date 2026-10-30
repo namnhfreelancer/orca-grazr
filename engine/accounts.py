@@ -1,0 +1,168 @@
+"""The accounts grazr enrolled, as files under its own state directory.
+
+Nothing here is Claude's. An entry holds an identity from a Claude login, but
+the file, its name and the parked snapshot are grazr's own.
+"""
+
+import json
+import os
+import uuid
+from datetime import datetime, timezone
+
+import atomic
+import core
+
+
+def parse_time(value):
+    """A bare timestamp would raise when compared against an aware `now`, deep
+    inside the decision. It lives here rather than in claude.py so this module
+    depends on nothing above it."""
+    if not value:
+        return None
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def account_id(value):
+    """The server's account id becomes a filename and a keychain service, so it
+    has to be a plain uuid and nothing else."""
+    try:
+        # Compared case-insensitively: some providers return uppercase, and it
+        # is the same account. The canonical lowercase form is what gets used.
+        canonical = str(uuid.UUID(str(value)))
+        if canonical == value.lower():
+            return canonical
+    except (AttributeError, TypeError, ValueError):
+        pass
+    raise RuntimeError("That login has no usable account identity: %r" % (value,))
+
+
+def has_parked_credential(store, identifier):
+    """An account whose parked credential went missing cannot be rotated to,
+    and the only way to find out is to look."""
+    return store.read_parked(identifier) is not None
+
+
+def load(paths, names):
+    """Enrolled accounts in the configured preference order. An unknown name is
+    skipped rather than fatal, so a typo cannot stop rotation entirely."""
+    by_name = {}
+    for filename in sorted(os.listdir(paths.accounts_dir)):
+        if filename.startswith(".") or not filename.endswith(".json"):
+            continue
+        identifier = filename[: -len(".json")]
+        try:
+            stored = read(paths, identifier)
+        except (OSError, ValueError):
+            continue
+        # Valid JSON is not yet a valid account.
+        if not isinstance(stored, dict) or not isinstance(stored.get("name", identifier), str):
+            continue
+        by_name[stored.get("name", identifier)] = core.Account(
+            id=identifier,
+            name=stored.get("name", identifier),
+            snapshot=snapshot_from_json(stored.get("snapshot")),
+        )
+    if not names:
+        return [by_name[name] for name in sorted(by_name)]
+    return [by_name[name] for name in names if name in by_name]
+
+
+def read(paths, identifier):
+    with open(os.path.join(paths.accounts_dir, identifier + ".json")) as handle:
+        return json.load(handle)
+
+
+def write(paths, identifier, account):
+    """Metadata only -- never a secret. The credential lives in the store."""
+    atomic.write(
+        os.path.join(paths.accounts_dir, identifier + ".json"),
+        json.dumps(account, indent=2),
+    )
+
+
+def record_snapshot(paths, identifier, snapshot):
+    """Best-effort: the swap has already happened, so an account we never
+    enrolled is nothing to record against rather than a reason to fail."""
+    try:
+        account = read(paths, identifier)
+    except (OSError, ValueError):
+        return
+    account["snapshot"] = snapshot_to_json(snapshot)
+    write(paths, identifier, account)
+
+
+def mark_first_reading_due(paths, identifier, due=True):
+    """Set by the swap that installs this account, cleared by the first
+    reading that shows a turn on it."""
+    try:
+        account = read(paths, identifier)
+    except (OSError, ValueError):
+        return
+    if due:
+        account["first_reading_due"] = True
+    else:
+        account.pop("first_reading_due", None)
+    write(paths, identifier, account)
+
+
+def first_reading_due(paths, identifier):
+    try:
+        return read(paths, identifier).get("first_reading_due") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def updated_at(paths, identifier):
+    """Unix seconds of the account's last recorded reading: the mtime of its
+    state file. None when the file cannot be read."""
+    try:
+        return os.path.getmtime(os.path.join(paths.accounts_dir, identifier + ".json"))
+    except OSError:
+        return None
+
+
+def snapshot_to_json(snapshot):
+    if not isinstance(snapshot, list):
+        return None
+    return [
+        {
+            "kind": entry.kind,
+            "scope": entry.scope,
+            "group": entry.group,
+            "remaining": entry.remaining,
+            "resets_at": entry.resets_at.isoformat() if entry.resets_at else None,
+        }
+        for entry in snapshot
+    ]
+
+
+def snapshot_from_json(stored):
+    """Anything unrecognised reads as never parked. A hand-edited account file
+    must not take rotation out for every account."""
+    if stored is None:
+        return None
+    try:
+        limits = [
+            core.Limit(
+                kind=entry["kind"],
+                scope=entry["scope"],
+                group=entry["group"],
+                remaining=entry["remaining"],
+                resets_at=parse_time(entry["resets_at"]),
+            )
+            for entry in stored
+        ]
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    # The decision compares these, and a string or a bool would compare wrong
+    # rather than raise.
+    if all(
+        isinstance(entry.kind, str)
+        and isinstance(entry.group, str)
+        and isinstance(entry.remaining, (int, float))
+        and not isinstance(entry.remaining, bool)
+        for entry in limits
+    ):
+        return limits
+    return None
