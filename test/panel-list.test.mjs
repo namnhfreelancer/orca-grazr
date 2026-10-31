@@ -347,8 +347,8 @@ test('an active account that is blocked offers Re-authenticate… in the data an
 // --- plan chip ---
 
 test('planLabel names the plan and appends the multiplier from seat_tier first, else tier', () => {
-  assert.equal(planLabel({ type: 'claude_max', tier: 'default_claude_max_20x', seat_tier: null }), 'Max 20x')
-  assert.equal(planLabel({ type: 'claude_team', tier: 'default_claude_max_20x', seat_tier: 'default_claude_max_5x' }), 'Team 5x')
+  assert.equal(planLabel({ type: 'claude_max', tier: 'default_claude_max_20x', seat_tier: null }), 'Ultra', 'Max 20x is now Ultra')
+  assert.equal(planLabel({ type: 'claude_team', tier: 'default_claude_max_20x', seat_tier: 'default_claude_max_5x' }), 'Team 5x', 'Team keeps its multiplier')
   assert.equal(planLabel({ type: 'claude_pro' }), 'Pro')
   assert.equal(planLabel({ type: 'claude_enterprise', tier: 'enterprise' }), 'Enterprise')
   assert.equal(planLabel({ type: 'claude_free_trial' }), 'Free Trial')
@@ -370,7 +370,7 @@ test('listOf gives each account its plan label, null when the record has none', 
   report.accounts[0].plan = { type: 'claude_max', tier: 'default_claude_max_20x', seat_tier: null }
   report.accounts[1].plan = { type: 'claude_team', tier: 'default_claude_max_20x', seat_tier: 'default_claude_max_5x' }
   const accounts = byName(report)
-  assert.equal(accounts.a.plan, 'Max 20x')
+  assert.equal(accounts.a.plan, 'Ultra')
   assert.equal(accounts.b.plan, 'Team 5x')
   assert.equal(accounts.c.plan, null)
   assert.equal(accounts.e.plan, null, 'a placeholder has no plan')
@@ -381,7 +381,7 @@ test('the plan chip sits after the name, before Active, and is absent without a 
   report.accounts[0].plan = { type: 'claude_max', tier: 'default_claude_max_20x', seat_tier: null }
   const html = cardOf(report, { commands: CMD })
   const head = acct(html, 'a').split('<span class="spacer">')[0]
-  assert.ok(head.includes('<span class="acct-name">a</span><span class="chip chip-muted">Max 20x</span><span class="chip chip-on">Active</span>'))
+  assert.ok(head.includes('<span class="acct-name">a</span><span class="chip chip-muted">Ultra</span><span class="chip chip-on">Active</span>'))
   assert.equal(acct(html, 'b').includes('chip-muted">Max'), false)
 })
 
@@ -395,8 +395,8 @@ test('the plan chip escapes its label', () => {
 })
 
 test('planLabel takes the last non-empty underscore segment as the multiplier, only when it is digits then x', () => {
-  assert.equal(planLabel({ type: 'claude_max', tier: 'default_claude_max_20x' }), 'Max 20x')
-  assert.equal(planLabel({ type: 'claude_max', tier: '20x' }), 'Max 20x')
+  assert.equal(planLabel({ type: 'claude_team', tier: 'default_claude_max_20x' }), 'Team 20x')
+  assert.equal(planLabel({ type: 'claude_team', tier: '20x' }), 'Team 20x')
   assert.equal(planLabel({ type: 'claude_max', tier: 'default_claude_max_abx' }), 'Max')
   assert.equal(planLabel({ type: 'claude_max', tier: 'x' }), 'Max')
 })

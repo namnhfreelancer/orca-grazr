@@ -26,7 +26,7 @@ test('every vendored engine file is present', async () => {
   }
 })
 
-test('the vendored engine is version 0.4.7+fork.10', async () => {
+test('the vendored engine is version 0.4.7+fork.11', async () => {
   const source = await readFile(resolve(engine, 'grazr.py'), 'utf8')
-  assert.ok(source.includes('VERSION = "0.4.7+fork.10"'))
+  assert.ok(source.includes('VERSION = "0.4.7+fork.11"'))
 })

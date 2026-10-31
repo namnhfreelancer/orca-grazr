@@ -4,8 +4,8 @@ These files are a copy of the grazr engine. Edit the engine in its own repositor
 
 - Source: https://github.com/senadaruc/herdr-grazr
 - Branch: `orca-port`
-- Commit: `eea43440c46e9b743a880316979e3e8732d4962d`
-- Engine version: `0.4.7+fork.10`
+- Commit: `eb6c8107dfe15bf0d749445af4dd9e5e8ec77218`
+- Engine version: `0.4.7+fork.11`
 - Upstream: https://github.com/wazum/herdr-grazr (MIT, Wolfgang Klinger)
 
 Vendored files: `grazr.py`, `claude.py`, `core.py`, `accounts.py`, `stores.py`, `atomic.py`, `pins.py`, `shim.py`, `LICENSE`.
@@ -22,3 +22,5 @@ done
 ```
 
 Then update the commit and version above, and run `npm test`.
+
+The public copy differs from that commit in one comment only: a host name in `grazr.py` is replaced by `devbox`.

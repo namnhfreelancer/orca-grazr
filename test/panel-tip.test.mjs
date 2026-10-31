@@ -37,7 +37,7 @@ test('each dial segment carries its window reading, formatted reset and the row 
   const byName = Object.fromEntries(segments.map((s) => [s.name, s]))
   // models and usable are the model rings' fields, checked in panel-rings.test.mjs.
   const { models, usable, ...dial } = byName.a
-  assert.deepEqual(dial, { index: 1, name: 'a', remaining: 42.4, resets: 'Wed 18:00', tone: 'fine', state: 'active' })
+  assert.deepEqual(dial, { index: 1, name: 'a', remaining: 42.4, resets: 'Wed 18:00', tone: 'fine', state: 'active', noLimit: false })
   assert.equal(byName.b.tone, 'warning', 'next')
   assert.equal(byName.c.tone, 'blocked')
   assert.equal(byName.c.remaining, null)

@@ -4,6 +4,19 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.6.2 - 2026-10-31
+
+Needs Orca 1.4.245 or later. The bundled engine is `0.4.7+fork.11`.
+
+Anthropic renamed the Max plans on 2026-10-30: Max 20x is now Ultra, and Max 5x is now Max.
+
+### Changed
+
+- Plan chips follow the rename. A Max plan at 20x reads `Ultra`, a Max plan at 5x reads `Max`, and any plan whose type or tier says `ultra` reads `Ultra`. Pro, Team and Enterprise are unchanged.
+- An account with a current weekly reading and no 5-hour window reads `no 5-hour limit` on the 5h view, in the muted tone, instead of `no reading`. It is never shown as spent on the 5h view because of its missing 5-hour window. The dial's tooltip and centre say the same, and the active and next accounts keep their labels with the wording added.
+- A host where no account has a 5-hour window, but some account has a live weekly reading, opens on Week whatever `panelView` says. Its 5h button still works and shows `no 5-hour limit`.
+- The bundled engine is `0.4.7+fork.11`: a status line whose `five_hour` window is null or unusable keeps the weekly reading instead of dropping it.
+
 ## 0.6.1 (public) - 2026-10-31
 
 First public release. It has the features of the development 0.6.1 below, with these differences:
