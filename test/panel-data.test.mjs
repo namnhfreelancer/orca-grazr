@@ -408,6 +408,19 @@ test('engine: outdated when the installed version differs from the bundled one, 
   assert.deepEqual(host('0.4.7+fork.5'), { installed: '0.4.7+fork.5', bundled: '0.4.7+fork.5', outdated: false })
 })
 
+test('engine: an installed version newer than the bundled one is not outdated, and numbers compare as numbers', () => {
+  const settings = { hosts: [{ name: 'mac' }], target: 'mac' }
+  const host = (installed, bundledVersion) => buildPanelData({
+    settings,
+    now: NOW,
+    bundledVersion,
+    hosts: [{ host: settings.hosts[0], result: { ok: true, value: { ...fixture(), version: installed } } }],
+  }).hosts[0].engine
+  assert.equal(host('0.4.7+fork.11', '0.4.7+fork.10').outdated, false)
+  assert.equal(host('0.4.9+fork.1', '0.4.10+fork.1').outdated, true)
+  assert.equal(host('0.4.10+fork.1', '0.4.9+fork.99').outdated, false)
+})
+
 test('engine: a report without a version has installed null and is not outdated, and an unknown bundled version is never outdated', () => {
   const settings = { hosts: [{ name: 'mac' }], target: 'mac' }
   const run = (value, bundledVersion) => buildPanelData({

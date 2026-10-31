@@ -4,6 +4,29 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.6.3 - 2026-10-31
+
+Needs Orca 1.4.245 or later, the `orca` CLI on this Mac, and a paired Orca environment for each remote host that signs in. The bundled engine is still `0.4.7+fork.11`.
+
+### Changed
+
+- `Add account…` and `Re-authenticate…` open Claude's login in Orca's built-in browser, never the system browser. A re-authentication uses its account's own isolated browser profile, `grazr · <account>`, reused by later sign-ins. An add-account sign-in gets a fresh profile, `grazr · new account <yyyy-mm-dd hh:mm>`, which is deleted when that sign-in ends, whatever the outcome.
+- The login runs on a remote host, in a throwaway directory there: the card's own host, or for a card on this Mac `signinHost`, else the first remote host with an Orca environment. The Mac-local `claude auth login` path is removed. With no such host, the sign-in is refused at once.
+- A second sign-in for the same card cancels the running one: its login is stopped and discarded and its tab closed, then the new sign-in starts. A sign-in that is already enrolling is left to finish.
+- The remote login runs under `ssh -tt` and `timeout 630`, so dropping the connection ends it on the remote host too.
+- Only an https address on claude.ai, claude.com or anthropic.com is opened for a sign-in.
+- New settings: `orcaBin` (default `/usr/local/bin/orca`), `signinHost`, and per host `claudeBin` (default `~/.local/bin/claude`) and `orcaEnvironment` (default: the host's name for an ssh host). The top-level `claudeBin` setting is no longer read.
+
+### Fixed
+
+- The `engine update available` chip shows only when the bundled engine is newer than the installed one. It compares major, minor and patch numerically, then the `+fork.N` number. An installed engine newer than the bundled one shows nothing.
+- Orca's pretty-printed JSON replies are read whole, then by their last line.
+- A sign-in address is taken with or without its trailing newline, on stdout or stderr.
+- A tab that fails to open closes any tab on the same address. A fresh profile is deleted even when the sign-in is cancelled while it is being created.
+- Each add-account profile label carries a random suffix, so concurrent sign-ins get distinct profiles.
+- An ssh alias that starts with `-` is dropped, and an `orcaEnvironment` that starts with `-` is ignored.
+- A login that reaches the 10-minute limit before its address appears is reported as a timed-out sign-in.
+
 ## 0.6.2 - 2026-10-31
 
 Needs Orca 1.4.245 or later. The bundled engine is `0.4.7+fork.11`.

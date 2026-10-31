@@ -427,7 +427,7 @@ test('the page footer no longer carries the global as-of time', () => {
   assert.ok(html.includes("textContent = 'Cmd-J Grazr: Refresh panel'"))
 })
 
-test('renderPanel escapes an engine version that carries markup and quotes, in the engine and message lines', () => {
+test('renderPanel escapes an engine version that carries markup and quotes, in the engine line', () => {
   const version = `<x>"'&`
   const settings = { hosts: [{ name: 'mac' }], target: 'mac' }
   const data = buildPanelData({
@@ -439,7 +439,8 @@ test('renderPanel escapes an engine version that carries markup and quotes, in t
   const html = renderPanel(data, { template: TEMPLATE, commands: {} })
   assert.equal(html.includes('<x>'), false)
   assert.ok(html.includes('<p class="engine">engine &lt;x&gt;"\'&amp;</p>'))
-  assert.ok(html.includes('<p class="msg" data-host="mac">Engine &lt;x&gt;"\'&amp; · 0.4.7+fork.6 bundled'))
+  // A version that does not parse is never outdated, so it gets no update message or chip.
+  assert.equal(html.includes('engine update available'), false)
 })
 
 test('a non-target outdated card says to target through to it, and its summary shows the engine chip', () => {

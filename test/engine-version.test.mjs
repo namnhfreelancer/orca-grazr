@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readBundledVersion } from '../lib/engine-version.mjs'
+import { readBundledVersion, isNewerEngine } from '../lib/engine-version.mjs'
 
 const ROOT = '/plug'
 const ENGINE = `${ROOT}/engine/grazr.py`
@@ -36,4 +36,24 @@ test('readBundledVersion rejects naming the path when the engine has no VERSION 
     assert.ok(err.message.includes(ENGINE), err.message)
     return true
   })
+})
+
+test('isNewerEngine is true only when the bundled release is newer, compared numerically', () => {
+  assert.equal(isNewerEngine('0.4.7+fork.11', '0.4.7+fork.10'), true)
+  assert.equal(isNewerEngine('0.4.7+fork.10', '0.4.7+fork.11'), false, 'an installed fork newer than the bundled one shows nothing')
+  assert.equal(isNewerEngine('0.4.7+fork.11', '0.4.7+fork.11'), false)
+  assert.equal(isNewerEngine('0.4.10+fork.1', '0.4.9+fork.99'), true, 'patch 10 is newer than 9, not compared as text')
+  assert.equal(isNewerEngine('0.4.9+fork.1', '0.4.10+fork.1'), false)
+  assert.equal(isNewerEngine('0.10.0', '0.9.9+fork.5'), true, 'minor 10 is newer than 9')
+  assert.equal(isNewerEngine('1.0.0', '0.99.99+fork.99'), true)
+  assert.equal(isNewerEngine('0.4.7+fork.1', '0.4.7'), true, 'a fork suffix is newer than none')
+  assert.equal(isNewerEngine('0.4.7', '0.4.7+fork.1'), false, 'no suffix is older than a fork of the same release')
+})
+
+test('isNewerEngine is never true for a version it cannot parse, or a missing one', () => {
+  assert.equal(isNewerEngine(null, '0.4.7+fork.1'), false)
+  assert.equal(isNewerEngine('0.4.7+fork.2', null), false)
+  assert.equal(isNewerEngine('0.4.7+fork.2', 'nightly'), false)
+  assert.equal(isNewerEngine('weird', '0.4.7'), false)
+  assert.equal(isNewerEngine('0.4.7+fork.2', 7), false)
 })

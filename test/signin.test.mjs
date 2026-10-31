@@ -1,303 +1,301 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
-import { createSigninJobs, loginEnv, clip, LOGIN_TIMEOUT_MS, HARD_DEADLINE_MS, KILL_GRACE_MS, LINE_MAX } from '../lib/signin.mjs'
+import { loginHostFor, clip, LINE_MAX, LOGIN_TIMEOUT_MS, URL_TIMEOUT_MS } from '../lib/signin.mjs'
+import { mergeSettings } from '../lib/hosts.mjs'
 import { fixtureSettings } from './support/fixture-hosts.mjs'
+import { D1, D2, DEV, EXPORT_LINE, MAC, NO_LOGIN_HOST, OK_ENROL, ORCA, SETTINGS, SSH, STAMP, URL, argAfter, assertCleaned, callsWith, closesOf, deletesOf, discardsOf, harness, json, openRemoteTab, until, LABEL } from './support/signin-harness.mjs'
 
-const settings = fixtureSettings()
-const mac = settings.hosts.find((h) => h.name === 'mac')
-const dev = settings.hosts.find((h) => h.name === 'devbox')
-const DIR = '/tmp/T/grazr-login-abc123'
-const EXPORT = { identity: { emailAddress: 'a@b.io' }, blob: { claudeAiOauth: { accessToken: 'sk-secret-blob' } } }
-const EXPORT_LINE = `${JSON.stringify(EXPORT)}\n`
-
-// The engine subcommand an argv runs, locally (python3 engine ...) or over ssh (the remote command is the last argv).
-const labelOf = (argv) => (argv[0] === 'python3' ? argv.slice(2).join(' ') : argv.at(-1))
-
-// Answers engine subcommands by a substring of their label; a value may be a function of (argv).
-function answers(table) {
-  return (argv) => {
-    const cmd = labelOf(argv)
-    const key = Object.keys(table).find((k) => cmd.includes(k))
-    if (key === undefined) return {}
-    return typeof table[key] === 'function' ? table[key](argv) : table[key]
-  }
-}
-
-function fakeExec(route) {
-  const calls = []
-  const exec = async (argv, opts = {}) => {
-    calls.push({ argv, opts })
-    const next = (await route(argv, opts)) ?? {}
-    return { argv, code: 0, signal: null, stdout: '', stderr: '', timedOut: false, spawnError: null, timeoutMs: opts.timeoutMs, ...next }
-  }
-  return { exec, calls }
-}
-
-// Timers are recorded, never fired by themselves; a test fires the one it means.
-function fakeClock() {
-  const armed = []
-  return {
-    armed,
-    setTimeout: (fn, ms) => { const t = { fn, ms, cleared: false }; armed.push(t); return t },
-    clearTimeout: (t) => { if (t) t.cleared = true },
-    fire: (ms) => armed.find((t) => t.ms === ms && !t.cleared).fn(),
-  }
-}
-
-// A fake claude child: its close is emitted by the test; kill is recorded.
-function fakeSpawn({ throwWith = null } = {}) {
-  const spawns = []
-  const spawn = (file, args, opts) => {
-    if (throwWith) throw throwWith
-    const child = new EventEmitter()
-    child.stdout = new EventEmitter()
-    child.stderr = new EventEmitter()
-    child.stdin = new EventEmitter()
-    child.stdin.destroyed = false
-    child.stdin.destroy = () => { child.stdin.destroyed = true }
-    child.signals = []
-    child.kill = (signal) => { child.signals.push(signal) }
-    spawns.push({ file, args, opts, child })
-    return child
-  }
-  return { spawn, spawns }
-}
-
-const fakeFs = () => {
-  const removed = []
-  return {
-    removed,
-    mkdtemp: async (prefix) => `${prefix}abc123`,
-    rm: async (path) => { removed.push(path) },
-  }
-}
-
-async function until(pred) {
-  for (let i = 0; i < 300; i++) {
-    if (pred()) return
-    await new Promise((resolve) => setImmediate(resolve))
-  }
-  throw new Error('condition not met')
-}
-
-function setup({ route, spawned = fakeSpawn(), clock = fakeClock(), timeoutMs = LOGIN_TIMEOUT_MS } = {}) {
-  const ex = fakeExec(route ?? answers({}))
-  const fs = fakeFs()
-  const published = []
-  const counts = { refresh: 0 }
-  const jobs = createSigninJobs({
-    exec: ex.exec,
-    spawn: spawned.spawn,
-    homedir: () => '/home/t',
-    tmpdir: '/tmp/T',
-    fs,
-    baseEnv: { PATH: '/usr/bin:/bin', HOME: '/home/t', ANTHROPIC_API_KEY: 'sk-ant-leak', LANG: 'en_GB.UTF-8' },
-    timers: clock,
-    publish: async (t) => { published.push(t) },
-    refreshPanel: async () => { counts.refresh++ },
-    loginTimeoutMs: timeoutMs,
-  })
-  // The job's outcome is one toast and one refresh; the wait is for both.
-  const done = () => until(() => counts.refresh === 1)
-  const exitLogin = async (code, stderr = '', signal = null) => {
-    await until(() => spawned.spawns.length === 1)
-    const { child } = spawned.spawns[0]
-    if (stderr) child.stderr.emit('data', Buffer.from(stderr))
-    child.emit('close', code, signal)
-  }
-  return { jobs, ex, fs, published, counts, spawned, clock, done, exitLogin }
-}
-
-const discards = (ex) => ex.calls.filter((c) => labelOf(c.argv) === `login-discard --from ${DIR}`)
-
-test('Mac sign-in with no account: browser login, enrol by the signed-in e-mail, discard, toast and refresh', async () => {
-  const s = setup({ route: answers({ 'login-export': { stdout: EXPORT_LINE }, 'enrol --from': { stdout: '{"ok":true,"id":"x","name":"a@b.io","email":"a@b.io","unblocked":true}\n' }, 'login-discard': {} }) })
-  const started = s.jobs.start({ host: mac, settings, account: null })
-  assert.deepEqual(started, { ok: true, message: 'Sign in to a new account in your browser' })
-  await s.exitLogin(0)
-  await s.done()
-  const [login] = s.spawned.spawns
-  assert.equal(login.file, 'claude')
-  assert.deepEqual(login.args, ['auth', 'login'])
-  assert.equal(login.opts.env.CLAUDE_CONFIG_DIR, DIR)
-  assert.equal(login.opts.env.ANTHROPIC_API_KEY, undefined)
-  assert.equal(login.opts.env.PATH, '/usr/bin:/bin')
-  const enrol = s.ex.calls.find((c) => labelOf(c.argv).startsWith('enrol --from'))
-  assert.equal(labelOf(enrol.argv), `enrol --from ${DIR} --name a@b.io --json`)
-  assert.equal(discards(s.ex).length, 1)
-  assert.deepEqual(s.fs.removed, [DIR])
-  assert.equal(s.published.length, 1)
-  assert.equal(s.published[0].title, 'mac: signed in')
-  assert.equal(s.published[0].body, 'Enrolled a@b.io on mac')
+test('a remote card signs in on its own host: the login runs there in a throwaway dir, opens in that environment, enrols there and is discarded', async () => {
+  const h = harness()
+  assert.deepEqual(h.jobs.start({ host: DEV, settings: SETTINGS, account: null }), { ok: true, message: "Sign in to a new account in Orca's browser (devbox)" })
+  await until(() => h.spawns.length === 1)
+  const [login] = h.spawns
+  assert.equal(login.file, SSH)
+  assert.deepEqual(login.args.slice(0, -1), ['-tt', ...SETTINGS.sshOptions, 'devbox'])
+  assert.equal(login.args.at(-1), `CLAUDE_CONFIG_DIR=${D1} timeout 630 ~/.local/bin/claude auth login`)
+  login.child.emitUrl()
+  await until(() => callsWith(h, 'tab create').length === 1)
+  const create = callsWith(h, 'tab create')[0]
+  assert.equal(create.bin, ORCA)
+  assert.deepEqual(create.args.slice(0, 8), ['tab', 'create', '--environment', 'devbox', '--url', URL, '--profile', 'p1'])
+  assert.equal(create.args.at(-1), '--json')
+  assert.deepEqual(callsWith(h, 'tab profile create')[0].args.slice(0, 9), ['tab', 'profile', 'create', '--environment', 'devbox', '--label', `${LABEL}`, '--scope', 'isolated'])
+  login.child.exit(0)
+  await until(() => h.published.length === 1 && h.refreshes === 1)
+  assert.equal(h.published[0].title, 'devbox: signed in')
+  assert.equal(h.published[0].body, 'Enrolled a@example.com on devbox')
+  const enrol = callsWith(h, 'enrol --from')
+  assert.equal(enrol.length, 1)
+  assert.equal(enrol[0].where, 'devbox')
+  assert.match(enrol[0].line, new RegExp(`enrol --from ${D1} --name a@example\\.com --json$`))
+  assert.equal(enrol[0].input, undefined, 'a remote enrol reads the login where it is, nothing is piped')
+  assert.equal(h.calls.filter((c) => c.where === 'local').length, 0, 'the Mac runs nothing')
+  assert.equal(callsWith(h, 'login-export')[0].where, 'devbox', 'the e-mail is read on the login host')
+  assertCleaned(h, { dir: D1, page: 'page-1' })
+  assert.equal(closesOf(h, 'page-1')[0].args.includes('--environment'), true)
+  assert.deepEqual(deletesOf(h).map((c) => c.args.slice(3, 7)), [['--environment', 'devbox', '--profile', 'p1']], 'the fresh profile is deleted')
+  assert.equal(deletesOf(h)[0].args.at(-1), '--json')
+  assert.ok(h.calls.findIndex((c) => c.line.includes('tab profile delete')) > h.calls.findIndex((c) => c.line.includes('tab close')), 'deleted after its tab closes')
 })
 
-test('re-authentication passes the account as --email, --name and --expect-email', async () => {
-  const s = setup({ route: answers({ 'login-export': { stdout: EXPORT_LINE }, 'enrol --from': { stdout: '{"ok":true,"email":"a@b.io","unblocked":true}\n' }, 'login-discard': {} }) })
-  s.jobs.start({ host: mac, settings, account: 'a@b.io' })
-  await s.exitLogin(0)
-  await s.done()
-  assert.deepEqual(s.spawned.spawns[0].args, ['auth', 'login', '--email', 'a@b.io'])
-  const enrol = s.ex.calls.find((c) => labelOf(c.argv).startsWith('enrol --from'))
-  assert.equal(labelOf(enrol.argv), `enrol --from ${DIR} --name a@b.io --expect-email a@b.io --json`)
+test('a re-authentication passes the account as --email, labels its profile by the account, and enrols with --expect-email', async () => {
+  const h = harness()
+  h.profiles.push({ id: 'prof-7', label: 'grazr · a@example.com' })
+  const login = await openRemoteTab(h, 'a@example.com')
+  assert.equal(h.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${D1} timeout 630 ~/.local/bin/claude auth login --email a@example.com`)
+  assert.equal(callsWith(h, 'tab profile create').length, 0, 'the existing profile for the account is reused')
+  assert.equal(deletesOf(h).length, 0, 'a re-authentication profile is never deleted')
+  assert.equal(argAfter(callsWith(h, 'tab create')[0], '--profile'), 'prof-7')
+  login.exit(0)
+  await until(() => h.refreshes === 1)
+  assert.match(callsWith(h, 'enrol --from')[0].line, new RegExp(`enrol --from ${D1} --name a@example\\.com --expect-email a@example\\.com --json$`))
+  assert.equal(callsWith(h, 'login-export').length, 0, 'an account named by the card needs no export read')
+  assert.equal(h.published[0].title, 'devbox: signed in')
 })
 
-test('remote host: the export goes to the remote engine over ssh stdin, never in argv, and the credential is in no toast', async () => {
-  const s = setup({ route: answers({
-    'login-export': { stdout: EXPORT_LINE },
-    'enrol --stdin': { stdout: '{"ok":true,"email":"a@b.io","unblocked":true}\n' },
-    'login-discard': {},
-  }) })
-  s.jobs.start({ host: dev, settings, account: 'a@b.io' })
-  await s.exitLogin(0)
-  await s.done()
-  const remote = s.ex.calls.find((c) => c.argv[0] === settings.sshBin)
-  assert.equal(remote.argv[settings.sshOptions.length + 1], 'devbox')
-  assert.match(labelOf(remote.argv), /enrol --stdin --name a@b\.io --expect-email a@b\.io --json$/)
-  assert.equal(remote.opts.input, EXPORT_LINE)
-  assert.equal(JSON.stringify(s.ex.calls.map((c) => c.argv)).includes('sk-secret-blob'), false)
-  assert.equal(JSON.stringify(s.published).includes('sk-secret-blob'), false)
-  assert.equal(s.published[0].title, 'devbox: signed in')
-  assert.equal(discards(s.ex).length, 1, 'the throwaway login is discarded on the Mac')
+test('a Mac card signs in on the first remote host with an environment, and the export reaches the Mac engine only as its stdin', async () => {
+  const h = harness()
+  assert.deepEqual(h.jobs.start({ host: MAC, settings: SETTINGS, account: 'x@example.com' }), { ok: true, message: "Sign in to x@example.com in Orca's browser (devbox)" })
+  await until(() => h.spawns.length === 1)
+  assert.equal(h.spawns[0].args.at(-2), 'devbox')
+  h.spawns[0].child.emitUrl()
+  await until(() => callsWith(h, 'tab create').length === 1)
+  assert.equal(argAfter(callsWith(h, 'tab create')[0], '--environment'), 'devbox')
+  h.spawns[0].child.exit(0)
+  await until(() => h.refreshes === 1)
+  const stdin = callsWith(h, 'enrol --stdin')
+  assert.equal(stdin.length, 1)
+  assert.equal(stdin[0].where, 'local', 'the Mac engine enrols')
+  assert.equal(stdin[0].input, EXPORT_LINE)
+  assert.match(stdin[0].line, /enrol --stdin --name x@example\.com --expect-email x@example\.com --json$/)
+  assert.equal(callsWith(h, 'enrol --from').length, 0)
+  assert.equal(h.published[0].title, 'mac: signed in')
+  assertCleaned(h, { dir: D1, page: 'page-1' })
 })
 
-test('wrong account signed in: nothing is enrolled, the engine reason is the toast, the login is discarded', async () => {
-  const s = setup({ route: answers({
-    'login-export': { stdout: EXPORT_LINE },
-    'enrol --from': { code: 1, stdout: '{"ok":false,"error":"signed in as b@y.io, expected x@y.io"}\n' },
-    'login-discard': {},
-  }) })
-  s.jobs.start({ host: mac, settings, account: 'x@y.io' })
-  await s.exitLogin(0)
-  await s.done()
-  assert.equal(s.published[0].title, 'mac: sign-in failed')
-  assert.match(s.published[0].body, /signed in as b@y\.io, expected x@y\.io/)
-  assert.match(s.published[0].body, /Nothing was enrolled/)
-  assert.equal(discards(s.ex).length, 1)
+test('the export and the credential reach no argv, log or toast', async () => {
+  const h = harness()
+  h.jobs.start({ host: MAC, settings: SETTINGS, account: null })
+  await until(() => h.spawns.length === 1)
+  h.spawns[0].child.emitUrl()
+  await until(() => callsWith(h, 'tab create').length === 1)
+  h.spawns[0].child.exit(0)
+  await until(() => h.refreshes === 1)
+  const outside = [h.calls.map((c) => c.line), h.spawns.map((s) => s.args), h.published, h.logs]
+  assert.equal(JSON.stringify(outside).includes('sk-secret-blob'), false)
+  assert.equal(JSON.stringify(h.spawns.map((s) => s.args)).includes('sk-secret'), false)
 })
 
-test('sign-in abandoned: after the timeout claude is killed, the login discarded and the toast says timed out', async () => {
-  const s = setup({ route: answers({ 'login-export': { stdout: EXPORT_LINE }, 'login-discard': {} }) })
-  s.jobs.start({ host: mac, settings, account: null })
-  await until(() => s.spawned.spawns.length === 1)
-  s.clock.fire(LOGIN_TIMEOUT_MS)
-  assert.deepEqual(s.spawned.spawns[0].child.signals, ['SIGTERM'])
-  s.spawned.spawns[0].child.emit('close', null, 'SIGTERM')
-  await s.done()
-  assert.equal(s.published[0].title, 'mac: sign-in timed out')
-  assert.equal(s.ex.calls.some((c) => labelOf(c.argv).startsWith('enrol')), false)
-  assert.equal(discards(s.ex).length, 1)
+test('signinHost names the login host for a Mac card, and its environment is the one the tab opens in', async () => {
+  const settings = fixtureSettings({ signinHost: 'devbox-2' })
+  assert.equal(loginHostFor(settings, MAC).name, 'devbox-2')
+  const h = harness({ settings })
+  h.jobs.start({ host: settings.hosts[0], settings, account: null })
+  await until(() => h.spawns.length === 1)
+  assert.equal(h.spawns[0].args.at(-2), 'devbox-2')
+  assert.equal(loginHostFor(fixtureSettings({ signinHost: 'mac' }), MAC), null, 'a local signinHost is refused')
+  assert.equal(loginHostFor(fixtureSettings({ signinHost: 'missing' }), MAC), null)
 })
 
-test('a second start for the same host is refused while the first runs; another host is not blocked', async () => {
-  const s = setup({ route: answers({ 'login-export': { stdout: EXPORT_LINE }, 'enrol --from': { stdout: '{"ok":true,"email":"a@b.io","unblocked":true}\n' }, 'login-discard': {} }) })
-  assert.equal(s.jobs.start({ host: mac, settings }).ok, true)
-  assert.deepEqual(s.jobs.start({ host: mac, settings }), { ok: false, message: 'A sign-in for mac is already running' })
-  assert.equal(s.jobs.start({ host: dev, settings, account: 'x@y.io' }).ok, true)
-  await until(() => s.spawned.spawns.length === 2)
-  assert.equal(s.spawned.spawns.length, 2)
+test('no remote host with an environment: the sign-in is refused at once and nothing runs', () => {
+  const settings = mergeSettings({ hosts: [{ name: 'mac' }] })
+  const h = harness({ settings })
+  assert.deepEqual(h.jobs.start({ host: settings.hosts[0], settings, account: null }), { ok: false, message: NO_LOGIN_HOST })
+  assert.equal(h.calls.length + h.spawns.length, 0)
+  assert.equal(h.jobs.running.size, 0)
 })
 
-test('remote host unreachable after a good login: nothing enrolled there, discarded, the toast says the host could not be reached', async () => {
-  const s = setup({ route: answers({
-    'login-export': { stdout: EXPORT_LINE },
-    'enrol --stdin': { code: 255, stderr: 'ssh: Could not resolve hostname devbox\n' },
-    'login-discard': {},
-  }) })
-  s.jobs.start({ host: dev, settings, account: null })
-  await s.exitLogin(0)
-  await s.done()
-  assert.equal(s.published[0].title, 'devbox: sign-in failed')
-  assert.equal(s.published[0].body, 'devbox could not be reached; nothing was enrolled there.')
-  assert.equal(discards(s.ex).length, 1)
-  assert.deepEqual(s.fs.removed, [DIR])
+test('an account name that starts with a dash is refused before anything runs', () => {
+  const h = harness()
+  assert.equal(h.jobs.start({ host: DEV, settings: SETTINGS, account: '--help' }).ok, false)
+  assert.equal(h.calls.length + h.spawns.length, 0)
 })
 
-test('claude exits non-zero: its login line is the toast, no export is read, the login is discarded', async () => {
-  const s = setup({ route: answers({ 'login-discard': {} }) })
-  s.jobs.start({ host: mac, settings, account: null })
-  await s.exitLogin(1, 'Opening browser to sign in…\nLogin failed: access denied\n')
-  await s.done()
-  assert.equal(s.published[0].title, 'mac: sign-in failed')
-  assert.equal(s.published[0].body, 'Login failed: access denied\nNothing was enrolled.')
-  assert.equal(s.ex.calls.some((c) => labelOf(c.argv).startsWith('login-export')), false)
-  assert.equal(discards(s.ex).length, 1)
+test('the Claude binary is the host setting, and the Orca CLI is the orcaBin setting', async () => {
+  const settings = mergeSettings({ orcaBin: '/opt/orca', hosts: [{ name: 'mac' }, { name: 'devbox', ssh: 'devbox', claudeBin: '/opt/bin/claude' }] })
+  const h = harness({ settings })
+  h.jobs.start({ host: settings.hosts[1], settings, account: null })
+  await until(() => h.spawns.length === 1)
+  assert.equal(h.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${D1} timeout 630 /opt/bin/claude auth login`)
+  h.spawns[0].child.emitUrl()
+  await until(() => callsWith(h, 'tab create').length === 1)
+  assert.ok(h.calls.filter((c) => c.where === 'orca').length >= 2)
+  for (const c of h.calls.filter((x) => x.where === 'orca')) assert.equal(c.bin, '/opt/orca')
+  h.spawns[0].child.exit(null, '', 'SIGTERM')
+  await until(() => h.refreshes === 1)
 })
 
-test('claude cannot be run: the toast names the claudeBin and nothing else runs', async () => {
-  const enoent = Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' })
-  const s = setup({ spawned: fakeSpawn({ throwWith: enoent }), route: answers({ 'login-discard': {} }) })
-  s.jobs.start({ host: mac, settings, account: null })
-  await s.done()
-  assert.equal(s.published[0].body, 'Could not run claude: spawn claude ENOENT')
-})
-
-test('a login with no e-mail on the Mac is not enrolled', async () => {
-  const s = setup({ route: answers({ 'login-export': { stdout: '{"identity":{},"blob":{"claudeAiOauth":{}}}\n' }, 'login-discard': {} }) })
-  s.jobs.start({ host: mac, settings, account: null })
-  await s.exitLogin(0)
-  await s.done()
-  assert.match(s.published[0].body, /did not finish on this Mac/)
-  assert.equal(s.ex.calls.some((c) => labelOf(c.argv).startsWith('enrol')), false)
-})
-
-test('an engine busy refusal is shown as the engine says it', async () => {
-  const s = setup({ route: answers({
-    'login-export': { stdout: EXPORT_LINE },
-    'enrol --from': { code: 1, stdout: '{"ok":false,"error":"Busy rotating, try again in a moment"}\n' },
-    'login-discard': {},
-  }) })
-  s.jobs.start({ host: mac, settings, account: null })
-  await s.exitLogin(0)
-  await s.done()
-  assert.match(s.published[0].body, /Busy rotating, try again in a moment/)
-})
-
-test('a discard that throws is logged and does not stop the outcome toast', async () => {
-  const logs = []
-  const ex = fakeExec(answers({ 'login-export': { stdout: EXPORT_LINE }, 'enrol --from': { stdout: '{"ok":true,"email":"a@b.io","unblocked":true}\n' }, 'login-discard': () => { throw new Error('disk gone') } }))
-  const spawned = fakeSpawn()
-  let refreshes = 0
-  const published = []
-  const jobs = createSigninJobs({ exec: ex.exec, spawn: spawned.spawn, homedir: () => '/home/t', tmpdir: '/tmp/T', fs: fakeFs(), baseEnv: {}, timers: fakeClock(), log: (m) => logs.push(m), publish: async (t) => published.push(t), refreshPanel: async () => { refreshes++ } })
-  jobs.start({ host: mac, settings })
-  await until(() => spawned.spawns.length === 1)
-  spawned.spawns[0].child.emit('close', 0, null)
-  await until(() => refreshes === 1)
-  assert.equal(published[0].title, 'mac: signed in')
-  assert.ok(logs.some((m) => m.includes('discard failed: disk gone')))
-})
-
-test('loginEnv passes only the allowlist and sets the throwaway config dir', () => {
-  const env = loginEnv({ PATH: '/bin', HOME: '/h', ANTHROPIC_API_KEY: 'x', AWS_SECRET: 'y' }, DIR)
-  assert.deepEqual(Object.keys(env).sort(), ['CLAUDE_CONFIG_DIR', 'HOME', 'PATH'])
-  assert.equal(env.CLAUDE_CONFIG_DIR, DIR)
-})
-
-test('stdin is destroyed once the login has ended', async () => {
-  const s = setup({ route: answers({ 'login-export': { stdout: EXPORT_LINE }, 'enrol --from': { stdout: '{"ok":true,"email":"a@b.io","unblocked":true}\n' }, 'login-discard': {} }) })
-  s.jobs.start({ host: mac, settings, account: null })
-  await s.exitLogin(0)
-  await s.done()
-  assert.equal(s.spawned.spawns[0].child.stdin.destroyed, true)
-})
-
-test('a child that never emits close is given up on after SIGKILL and its host is released', async () => {
-  const s = setup({ route: answers({ 'login-discard': {} }) })
-  s.jobs.start({ host: mac, settings, account: null })
-  await until(() => s.spawned.spawns.length === 1)
-  const { child } = s.spawned.spawns[0]
-  s.clock.fire(LOGIN_TIMEOUT_MS)
+test('the URL that never comes: after 30 s the login is stopped, discarded, no tab opens and the card says so', async () => {
+  const h = harness()
+  h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  await until(() => h.spawns.length === 1)
+  const { child } = h.spawns[0]
+  h.clock.fire(URL_TIMEOUT_MS)
   assert.deepEqual(child.signals, ['SIGTERM'])
-  s.clock.fire(KILL_GRACE_MS)
-  assert.deepEqual(child.signals, ['SIGTERM', 'SIGKILL'])
-  assert.equal(s.jobs.running.has('mac'), true, 'still held until the hard deadline')
-  s.clock.fire(HARD_DEADLINE_MS)
-  await s.done()
-  assert.equal(s.published[0].title, 'mac: sign-in timed out')
-  assert.equal(child.stdin.destroyed, true)
-  assert.equal(s.jobs.running.has('mac'), false)
-  assert.equal(s.jobs.start({ host: mac, settings, account: null }).ok, true, 'a new sign-in can start for the host')
+  child.exit(null, '', 'SIGTERM')
+  await until(() => h.published.length === 1)
+  assert.equal(h.published[0].title, 'devbox: sign-in failed')
+  assert.match(h.published[0].body, /did not print its sign-in address within 30 s/)
+  assert.equal(callsWith(h, 'tab create').length, 0)
+  assert.equal(callsWith(h, 'enrol').length, 0)
+  assertCleaned(h, { dir: D1 })
+})
+
+test('a sign-in left unfinished for 10 minutes is stopped, discarded and its tab closed; the card says it timed out', async () => {
+  const h = harness()
+  const login = await openRemoteTab(h, null)
+  h.clock.fire(LOGIN_TIMEOUT_MS)
+  assert.deepEqual(login.signals, ['SIGTERM'])
+  login.exit(null, '', 'SIGTERM')
+  await until(() => h.refreshes === 1)
+  assert.equal(h.published[0].title, 'devbox: sign-in timed out')
+  assert.equal(callsWith(h, 'enrol').length, 0)
+  assertCleaned(h, { dir: D1, page: 'page-1' })
+})
+
+test('claude exits non-zero: its last line is the toast, clipped; nothing is enrolled; the login and tab are cleaned up', async () => {
+  const h = harness()
+  const login = await openRemoteTab(h, null)
+  login.exit(1, `Login failed: ${'z'.repeat(600)}\n`)
+  await until(() => h.refreshes === 1)
+  const [first, second] = h.published[0].body.split('\n')
+  assert.equal(first.length, LINE_MAX)
+  assert.equal(second, 'Nothing was enrolled.')
+  assert.equal(callsWith(h, 'enrol').length, 0)
+  assertCleaned(h, { dir: D1, page: 'page-1' })
+})
+
+test('a wrong account signed in: the engine reason is the toast, nothing is enrolled, and the login and tab are cleaned up', async () => {
+  const h = harness({ overrides: { 'enrol --from': () => ({ code: 1, stdout: '{"ok":false,"error":"signed in as b@example.com, expected x@example.com"}\n' }) } })
+  const login = await openRemoteTab(h, 'x@example.com')
+  login.exit(0)
+  await until(() => h.refreshes === 1)
+  assert.equal(h.published[0].title, 'devbox: sign-in failed')
+  assert.match(h.published[0].body, /signed in as b@example\.com, expected x@example\.com\nNothing was enrolled\./)
+  assertCleaned(h, { dir: D1, page: 'page-1' })
+})
+
+test('Orca cannot open the browser (the profile list fails): the login is stopped, discarded and nothing is enrolled', async () => {
+  const h = harness({ overrides: { 'tab profile list': () => ({ code: 1, stdout: json({ ok: false, error: { code: 'paired', message: 'This workspace runs on a paired server' } }) }) } })
+  h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  await until(() => h.spawns.length === 1)
+  const { child } = h.spawns[0]
+  h.spawns[0].child.emitUrl()
+  await until(() => child.signals.length === 1)
+  child.exit(null, '', 'SIGTERM')
+  await until(() => h.refreshes === 1)
+  assert.equal(h.published[0].title, 'devbox: sign-in failed')
+  assert.match(h.published[0].body, /could not open the sign-in: This workspace runs on a paired server\nNothing was enrolled\./)
+  assert.equal(callsWith(h, 'tab create').length, 0)
+  assertCleaned(h, { dir: D1 })
+})
+
+test('the browser tab does not open: the login is stopped and discarded and the card says Orca did not return a tab', async () => {
+  const h = harness({ overrides: { 'tab create': () => ({ code: 1, stdout: json({ ok: false, error: { message: 'no browser' } }) }) } })
+  h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  await until(() => h.spawns.length === 1)
+  const { child } = h.spawns[0]
+  child.emitUrl()
+  await until(() => child.signals.length === 1)
+  child.exit(null, '', 'SIGTERM')
+  await until(() => h.refreshes === 1)
+  assert.match(h.published[0].body, /could not open the sign-in: no browser/)
+  assertCleaned(h, { dir: D1 })
+})
+
+test('a remote card the login host cannot be reached on after a good login says so, and the login is discarded', async () => {
+  const h = harness({ overrides: { 'enrol --from': () => ({ code: 255, stderr: 'ssh: Could not resolve hostname devbox\n' }) } })
+  const login = await openRemoteTab(h, 'a@example.com')
+  login.exit(0)
+  await until(() => h.refreshes === 1)
+  assert.equal(h.published[0].body, 'devbox could not be reached; nothing was enrolled.')
+  assertCleaned(h, { dir: D1, page: 'page-1' })
+})
+
+test('a login host that cannot be reached at all starts nothing: no login, no tab, and no discard', async () => {
+  const h = harness({ overrides: { 'mktemp -d': () => ({ code: 255, stderr: 'ssh: Could not resolve hostname devbox\n' }) } })
+  h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  await until(() => h.refreshes === 1)
+  assert.equal(h.published[0].body, 'devbox could not be reached; nothing was enrolled.')
+  assert.equal(h.spawns.length, 0)
+  assertCleaned(h, {})
+})
+
+test('a directory mktemp prints that is not an absolute path is never used: nothing runs in it, and an empty one is removed', async () => {
+  const h = harness({ overrides: { 'mktemp -d': () => ({ stdout: 'tmp.5\n' }) } })
+  h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  await until(() => h.refreshes === 1)
+  assert.equal(h.spawns.length, 0)
+  assert.equal(h.published[0].body, 'devbox did not give a usable login directory.\nNothing was enrolled.')
+  assert.equal(callsWith(h, 'rmdir -- tmp.5').length, 1, 'the rejected directory is removed only if empty')
+  assertCleaned(h, {})
+})
+
+test('an absolute directory with characters the shell would split is passed quoted, never run as shell', async () => {
+  const dir = '/var/x; rm -rf ~/y'
+  const h = harness({ overrides: { 'mktemp -d': () => ({ stdout: `${dir}\n` }) } })
+  h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  await until(() => h.spawns.length === 1)
+  assert.equal(h.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR='${dir}' timeout 630 ~/.local/bin/claude auth login`)
+  h.spawns[0].child.exit(null, '', 'SIGTERM')
+  await until(() => h.refreshes === 1)
+})
+
+test('a login that cannot be started: the toast says so, and the login directory is still discarded', async () => {
+  const h = harness({ spawnThrows: Object.assign(new Error('spawn ssh ENOENT'), { code: 'ENOENT' }) })
+  h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  await until(() => h.refreshes === 1)
+  assert.equal(h.published[0].body, 'Could not run ssh: spawn ssh ENOENT\nNothing was enrolled.')
+  assertCleaned(h, { dir: D1 })
+})
+
+test('a second start on the same card cancels the running sign-in, discards its login, closes its tab, then starts; one login runs at a time', async () => {
+  const h = harness()
+  const first = await openRemoteTab(h, null)
+  const second = h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  assert.deepEqual(second, { ok: true, message: "Sign in to a new account in Orca's browser (devbox)" })
+  assert.deepEqual(first.signals, ['SIGTERM'])
+  assert.equal(h.spawns.length, 1, 'the new sign-in waits for the cancelled one to release its login')
+  first.exit(null, '', 'SIGTERM')
+  await until(() => h.spawns.length === 2)
+  assert.equal(h.published[0].title, 'devbox: sign-in cancelled')
+  assert.equal(h.published[0].body, 'A newer sign-in on this card replaced it. Nothing was enrolled.')
+  assert.equal(discardsOf(h, D1).length, 1)
+  assert.equal(closesOf(h, 'page-1').length, 1)
+  assert.equal(h.jobs.running.has('devbox'), true, 'the card stays held for the new sign-in')
+  assert.equal(h.spawns[1].args.at(-1), `CLAUDE_CONFIG_DIR=${D2} timeout 630 ~/.local/bin/claude auth login`)
+  h.spawns[1].child.emitUrl()
+  await until(() => callsWith(h, 'tab create').length === 2)
+  h.spawns[1].child.exit(0)
+  await until(() => h.published.length === 2 && h.refreshes === 2)
+  assert.equal(h.published[1].title, 'devbox: signed in')
+  assert.equal(h.jobs.running.has('devbox'), false)
+  assert.equal(h.calls.filter((c) => c.line.includes('login-discard')).length, 2)
+  assert.equal(discardsOf(h, D2).length, 1)
+  assert.equal(closesOf(h, 'page-2').length, 1)
+  assert.equal(h.jobs.running.size, 0)
+})
+
+test('a sign-in that is already enrolling is not cancelled by a newer start; the newer one waits for it', async () => {
+  let open
+  const gate = new Promise((resolve) => { open = resolve })
+  const h = harness({ overrides: { 'enrol --from': async () => { await gate; return { stdout: OK_ENROL } } } })
+  const first = await openRemoteTab(h, null)
+  first.exit(0)
+  await until(() => callsWith(h, 'enrol --from').length === 1)
+  h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  assert.deepEqual(first.signals, [], 'the enrolment is left to finish')
+  open()
+  await until(() => h.spawns.length === 2)
+  assert.equal(h.published[0].title, 'devbox: signed in')
+})
+
+test('a Mac card and a remote card run at once without waiting for each other', async () => {
+  const h = harness()
+  h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  h.jobs.start({ host: MAC, settings: SETTINGS, account: null })
+  await until(() => h.spawns.length === 2)
+  assert.equal(h.jobs.running.size, 2)
 })
 
 test('clip cuts a line to LINE_MAX characters with an ellipsis and leaves short text alone', () => {
@@ -307,27 +305,4 @@ test('clip cuts a line to LINE_MAX characters with an ellipsis and leaves short 
   assert.equal(cut.length, LINE_MAX)
   assert.ok(cut.endsWith('…'))
   assert.equal(clip(undefined), '')
-})
-
-test('a long claude stderr line reaches the toast clipped to LINE_MAX characters', async () => {
-  const s = setup({ route: answers({ 'login-discard': {} }) })
-  s.jobs.start({ host: mac, settings, account: null })
-  await s.exitLogin(1, `Login failed: ${'z'.repeat(600)}\n`)
-  await s.done()
-  const [first, second] = s.published[0].body.split('\n')
-  assert.equal(first.length, LINE_MAX)
-  assert.equal(second, 'Nothing was enrolled.')
-})
-
-test('a long engine error line reaches the toast clipped to LINE_MAX characters', async () => {
-  const s = setup({ route: answers({
-    'login-export': { stdout: EXPORT_LINE },
-    'enrol --from': { code: 1, stdout: `${JSON.stringify({ ok: false, error: 'e'.repeat(700) })}\n` },
-    'login-discard': {},
-  }) })
-  s.jobs.start({ host: mac, settings, account: null })
-  await s.exitLogin(0)
-  await s.done()
-  const [first] = s.published[0].body.split('\n')
-  assert.equal(first.length, LINE_MAX)
 })

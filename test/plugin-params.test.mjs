@@ -91,36 +91,57 @@ test('status returns ok and the per-host texts it toasted', async () => {
   assert.ok(outcome.message.includes('mac: work'))
 })
 
+// The login host creates its throwaway directory here; every other call goes to the route given.
+const TEMP = '/var/folders/t/tmp.1'
+const withTemp = (route = engine({})) => (argv, opts) => (argv.at(-1) === 'mktemp -d' ? { stdout: `${TEMP}\n` } : route(argv, opts))
+// A sign-in reaches its login child once the ssh child is spawned; the spawn happens after the command returns.
+const waitForSpawns = async (fake, n) => {
+  for (let i = 0; i < 200 && fake.spawns.length < n; i++) await new Promise((resolve) => setImmediate(resolve))
+}
+
 test('enrol with params starts a sign-in on that host and returns at once with its message, opening no Terminal', async () => {
-  const fake = await start({ route: engine({}) })
+  const fake = await start({ route: withTemp() })
   const outcome = await call(fake, 'enrol', { host: 'devbox', account: 'x@y' })
-  assert.deepEqual(outcome, { ok: true, message: 'Sign in to x@y in your browser' })
+  assert.deepEqual(outcome, { ok: true, message: "Sign in to x@y in Orca's browser (devbox)" })
   assert.equal(fake.execs.some((a) => a[0] === '/usr/bin/open'), false)
+  await waitForSpawns(fake, 1)
   assert.equal(fake.spawns.length, 1)
-  assert.equal(fake.spawns[0].file, 'claude')
-  assert.deepEqual(fake.spawns[0].args, ['auth', 'login', '--email', 'x@y'])
+  assert.equal(fake.spawns[0].file, '/usr/bin/ssh')
+  assert.equal(fake.spawns[0].args.at(-2), 'devbox')
+  assert.equal(fake.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${TEMP} timeout 630 ~/.local/bin/claude auth login --email x@y`)
 })
 
-test('enrol with params and no account says it will sign in to a new account', async () => {
-  const fake = await start({ route: engine({}) })
+test('enrol on the Mac with no account says it will sign in to a new account, on the first remote host with an environment', async () => {
+  const fake = await start({ route: withTemp() })
   const outcome = await call(fake, 'enrol', { host: 'mac' })
-  assert.equal(outcome.message, 'Sign in to a new account in your browser')
-  assert.deepEqual(fake.spawns[0].args, ['auth', 'login'])
+  assert.equal(outcome.message, "Sign in to a new account in Orca's browser (devbox)")
+  await waitForSpawns(fake, 1)
+  assert.equal(fake.spawns[0].args.at(-2), 'devbox')
+  assert.equal(fake.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${TEMP} timeout 630 ~/.local/bin/claude auth login`)
 })
 
-test('a second enrol for the same host while one runs is refused with its message', async () => {
-  const fake = await start({ route: engine({}) })
-  await call(fake, 'enrol', { host: 'mac' })
-  const again = await call(fake, 'enrol', { host: 'mac' })
-  assert.deepEqual(again, { ok: false, message: 'A sign-in for mac is already running' })
-  assert.equal(fake.spawns.length, 1)
+test('a second enrol for the same host cancels the running sign-in and starts the new one once the first has released its login', async () => {
+  const fake = await start({ route: withTemp() })
+  await call(fake, 'enrol', { host: 'devbox' })
+  await waitForSpawns(fake, 1)
+  const again = await call(fake, 'enrol', { host: 'devbox' })
+  assert.deepEqual(again, { ok: true, message: "Sign in to a new account in Orca's browser (devbox)" })
+  assert.deepEqual(fake.spawns[0].child.killed, ['SIGTERM'])
+  fake.spawns[0].child.emit('close', null, 'SIGTERM')
+  await waitForSpawns(fake, 2)
+  assert.equal(fake.spawns.length, 2)
+  assert.ok(fake.execs.some((a) => label(a) === `login-discard --from ${TEMP}`))
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.ok(fake.calls.some((c) => c.name === 'notifications.show' && c.params.title === 'devbox: sign-in cancelled'))
 })
 
 test('enrol with an empty params object is a panel call: it starts a sign-in on the target host', async () => {
-  const fake = await start({ route: engine({}) })
+  const fake = await start({ route: withTemp() })
   const outcome = await call(fake, 'enrol', {})
   assert.equal(outcome.ok, true)
+  await waitForSpawns(fake, 1)
   assert.equal(fake.spawns.length, 1)
+  assert.equal(fake.spawns[0].args.at(-2), 'devbox')
 })
 
 test('enrol with no params (the palette) types into the newest terminal and opens no window', async () => {

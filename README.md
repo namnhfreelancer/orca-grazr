@@ -18,7 +18,8 @@ The panel has three faces. **Dial** shows a ring with one segment per account, i
 
 - Orca 1.4.245 or later, with the plugin system enabled.
 - Python 3 (`python3`) on this Mac and on each remote host.
-- Claude Code on this Mac. Grazr signs accounts in with its `claude` binary.
+- Claude Code on each host that signs accounts in, at its `claudeBin` (default `~/.local/bin/claude`).
+- For sign-in: the `orca` CLI on this Mac (`orcaBin`, default `/usr/local/bin/orca`), a paired Orca environment for each remote host that signs in, and the `timeout` command on that host. See [Enrolling accounts](#enrolling-accounts).
 - `ssh` access to each remote host in batch mode, with keys or Tailscale SSH.
 - `rsync` on this Mac and on each remote host. `Install engine` copies the engine with it.
 
@@ -38,7 +39,7 @@ An installed copy shows the committed placeholder panel. To see live data in the
 
 1. **Add your hosts.** The shipped default manages only this Mac. To add a remote host, edit the plugin's `settings.json` (see [Settings](#settings) and [Remote hosts](#remote-hosts)). The file lives at `<userData>/plugins-data/senadaruc.grazr/settings.json`.
 2. **Install the engine on the target host.** Press Cmd-J and run `Grazr: Install engine on target`. Use `Grazr: Target → next host` to move the target to another host first.
-3. **Enrol accounts.** Open the Claude Accounts panel and press `Add account…`, which signs in through your browser. Then add the account names to the host's `config.env`, as described under [Enrolling accounts](#enrolling-accounts). Repeat for each host.
+3. **Enrol accounts.** Open the Claude Accounts panel and press `Add account…`, which signs in through Orca's built-in browser. Sign-in needs a remote host with a paired Orca environment, and the default settings manage only this Mac, so add one first (see [Remote hosts](#remote-hosts)). Then add the account names to the host's `config.env`, as described under [Enrolling accounts](#enrolling-accounts). Repeat for each host.
 4. **Open the panel.** Run `Grazr: Refresh panel`, then open the right sidebar and choose **Claude Accounts**.
 
 If another grazr already owns Claude's status line on the Mac, read [Status line owned by another grazr](#status-line-owned-by-another-grazr) before step 2.
@@ -47,9 +48,9 @@ If another grazr already owns Claude's status line on the Mac, read [Status line
 
 The panel runs each button through the Orca host. How the button completes depends on the Orca you run:
 
-- **On an Orca that offers the `commands.execute` host method** (proposed upstream in [stablyai/orca#36400](https://github.com/stablyai/orca/pull/36400)), the buttons run directly. Refresh, Swap and Turn rotation on or off run without typing anything, and the result shows on the card's message line. `Add account…` and `Re-authenticate…` open your browser for Claude's login, and the account is enrolled on the card's host once the login succeeds.
+- **On an Orca that offers the `commands.execute` host method** (proposed upstream in [stablyai/orca#36400](https://github.com/stablyai/orca/pull/36400)), the buttons run directly. Refresh, Swap and Turn rotation on or off run without typing anything, and the result shows on the card's message line. `Add account…` and `Re-authenticate…` open Claude's login in Orca's built-in browser, and the account is enrolled on the card's host once the login succeeds (see [Enrolling accounts](#enrolling-accounts)).
 This release does not request `commands:execute`. The panel tries the method first and, when the host refuses it, falls back to typing as described next.
-- **On current Orca**, which does not offer that method yet, the buttons type the command into the most recently opened terminal of the focused worktree. They do not press Return: read the command and press Return yourself. If the newest terminal is an agent pane, open a new shell terminal first. The line under each card says where the text went, or asks you to open a shell terminal in a worktree first.
+- **On current Orca**, which does not offer that method yet, the buttons type the command into the most recently opened terminal of the focused worktree. They do not press Return: read the command and press Return yourself. If the newest terminal is an agent pane, open a new shell terminal first. The line under each card says where the text went, or asks you to open a shell terminal in a worktree first. On this kind of Orca, `Add account…` and `Re-authenticate…` do not start a sign-in: the card shows the enrol command under its message line instead, to run in a shell terminal.
 
 The palette commands always work, on either Orca. From the palette, `Grazr: Type enrol command into terminal` and `Grazr: Type status command into terminal` type into the newest terminal of the focused worktree.
 
@@ -68,7 +69,8 @@ Orca keeps the settings in `<userData>/plugins-data/senadaruc.grazr/settings.jso
 - `forceInstall`: whether `Install engine` takes over a status line that another grazr owns. It is the default for every host; a host can override it with its own `forceInstall`.
 - `panelFace`: the face every card opens with: `clock`, `dial` or `list`. The default is `clock`.
 - `panelView`: the window every card opens with: `session` (5h) or `weekly` (Week). The default is `session`.
-- `claudeBin`: the Claude Code binary that `Add account…` and `Re-authenticate…` run on this Mac. The default is `claude`. Set a full path if it is not on the plugin's PATH.
+- `orcaBin`: the Orca CLI that opens each sign-in in Orca's built-in browser. The default is `/usr/local/bin/orca`. A value that is blank or starts with `-` falls back to the default.
+- `signinHost`: optional. The name of a configured remote host whose Orca environment shows the sign-in for a card on this Mac. When it is unset, the first remote host that has an Orca environment is used.
 - `sshBin`, `rsyncBin`: the `ssh` and `rsync` binaries to run.
 - `sshOptions`: the options passed to every `ssh` call. The defaults are `BatchMode=yes` and a 5 second connect timeout.
 
@@ -79,6 +81,8 @@ Add a remote host to `hosts` in `settings.json`. Each host has these fields:
 - `name`: the label used in toasts and by `target`.
 - `ssh`: the `ssh` host alias, or `null` for this Mac. The alias must work non-interactively (`BatchMode`), so set up keys first.
 - `python`: the Python 3 interpreter on that host. The default is `python3`.
+- `claudeBin`: optional. The Claude Code binary on that host, run for a sign-in over `ssh`. The default is `~/.local/bin/claude`. A value that is blank or starts with `-` falls back to the default.
+- `orcaEnvironment`: optional. The Orca environment whose built-in browser shows a sign-in for this host. The default is the host's `name` for an ssh host, and none for this Mac. A value that starts with `-` is ignored.
 - `notifier`: how the engine reports notices. This Mac uses `osascript`, so the engine posts macOS notifications directly. Remote hosts use `queue`, and the plugin drains and shows those notices.
 - `forceInstall`: optional, `true` or `false`. It overrides the global `forceInstall` for this host only. Leave it out to follow the global value.
 
@@ -92,7 +96,16 @@ A host list that includes the Mac must keep the Mac's entry with `"ssh": null` a
 
 ## Enrolling accounts
 
-`Add account…` and `Re-authenticate…` on a panel card sign in through your browser and enrol the account on that card's host. The Mac's login is used for the sign-in; a remote host receives the signed-in account over `ssh`, and the Mac's copy is discarded afterwards. A sign-in not finished within 10 minutes is abandoned, and a second sign-in for the same host waits for the first.
+`Add account…` and `Re-authenticate…` on a panel card sign in through Orca's built-in browser and enrol the account on that card's host. Nothing opens in your system browser.
+
+How a sign-in works:
+
+- The login runs on a remote host, in a throwaway directory there, over `ssh` with a pty. A card on a remote host signs in on that host. A card on this Mac signs in on `signinHost`, or on the first remote host with an Orca environment. Without a remote host that has an Orca environment, the sign-in is refused at once.
+- That host's Orca environment opens Claude's sign-in address in Orca's built-in browser, in an isolated browser profile. A re-authentication reuses the account's profile, `grazr · <account>`. An add-account sign-in gets a fresh profile, `grazr · new account <yyyy-mm-dd hh:mm>`, which is deleted when the sign-in ends, whatever the outcome.
+- Only an https address on claude.ai, claude.com or anthropic.com is opened. Anything else is refused and nothing is opened.
+- The enrolment reads the login on the remote host. This Mac receives the account's export only on the stdin of its engine, never in an argument, and the login is discarded afterwards on the remote host.
+- Hanging up ends the remote login. The remote command also runs under `timeout 630`, so a sign-in that never finishes stops on the remote host too. The `timeout` command must exist on that host.
+- A second sign-in for the same card cancels the running one: its login is stopped, discarded and its tab closed, and then the new sign-in starts. A sign-in not finished within 10 minutes is abandoned.
 
 To enrol from the terminal instead:
 

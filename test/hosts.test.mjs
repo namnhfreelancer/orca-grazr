@@ -2,6 +2,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   DEFAULT_SETTINGS,
+  claudeBinOf,
+  environmentOf,
   mergeSettings,
   currentTarget,
   nextTarget,
@@ -167,15 +169,37 @@ test('isRemote is true only for a host with a non-empty ssh alias', () => {
   assert.equal(isRemote({ name: 'devbox', ssh: 'devbox' }), true)
 })
 
-test('claudeBin defaults to claude and keeps a non-empty string that does not start with a dash', () => {
-  assert.equal(DEFAULT_SETTINGS.claudeBin, 'claude')
-  assert.equal(mergeSettings({ claudeBin: '/opt/bin/claude' }).claudeBin, '/opt/bin/claude')
-  assert.equal(mergeSettings({ claudeBin: '' }).claudeBin, 'claude')
-  assert.equal(mergeSettings({ claudeBin: '   ' }).claudeBin, 'claude')
-  assert.equal(mergeSettings({ claudeBin: 4 }).claudeBin, 'claude')
-  assert.equal(mergeSettings({ claudeBin: '-p' }).claudeBin, 'claude')
-  assert.equal(mergeSettings({ claudeBin: '  --help' }).claudeBin, 'claude')
+test('claudeBin is per host: an unset one runs ~/.local/bin/claude, a usable one is kept, a bad one falls back', () => {
+  assert.equal(DEFAULT_SETTINGS.claudeBin, undefined, 'claudeBin is no longer a top-level setting')
+  const bin = (claudeBin) => claudeBinOf(mergeSettings({ hosts: [{ name: 'box', ssh: 'box', ...(claudeBin === undefined ? {} : { claudeBin }) }] }).hosts[0])
+  assert.equal(bin(undefined), '~/.local/bin/claude')
+  assert.equal(bin('/opt/bin/claude'), '/opt/bin/claude')
+  assert.equal(bin('~/bin/claude'), '~/bin/claude')
+  assert.equal(bin(''), '~/.local/bin/claude')
+  assert.equal(bin('   '), '~/.local/bin/claude')
+  assert.equal(bin(4), '~/.local/bin/claude')
+  assert.equal(bin('-p'), '~/.local/bin/claude')
+  assert.equal(bin('  --help'), '~/.local/bin/claude')
+})
+
+test('no terminal app setting is left in the defaults', () => {
   assert.equal(DEFAULT_SETTINGS.terminalApp, undefined)
+})
+
+test('orcaBin defaults to /usr/local/bin/orca and falls back for a blank or dashed value', () => {
+  assert.equal(DEFAULT_SETTINGS.orcaBin, '/usr/local/bin/orca')
+  assert.equal(mergeSettings({ orcaBin: '/opt/orca' }).orcaBin, '/opt/orca')
+  assert.equal(mergeSettings({ orcaBin: '' }).orcaBin, '/usr/local/bin/orca')
+  assert.equal(mergeSettings({ orcaBin: '--json' }).orcaBin, '/usr/local/bin/orca')
+  assert.equal(mergeSettings({ orcaBin: 3 }).orcaBin, '/usr/local/bin/orca')
+})
+
+test('environmentOf: an ssh host is its own environment unless orcaEnvironment names another; the Mac has none', () => {
+  assert.equal(environmentOf({ name: 'devbox', ssh: 'devbox' }), 'devbox')
+  assert.equal(environmentOf({ name: 'lab', ssh: 'lab-box', orcaEnvironment: 'devbox-2' }), 'devbox-2')
+  assert.equal(environmentOf({ name: 'lab', ssh: 'lab', orcaEnvironment: '  ' }), 'lab')
+  assert.equal(environmentOf({ name: 'mac', ssh: null }), null)
+  assert.equal(environmentOf({ name: 'mac', ssh: null, orcaEnvironment: 'devbox' }), 'devbox')
 })
 
 test('hostFor returns the host the params name, and the target when they name none, and null for an unknown host', () => {
@@ -185,4 +209,16 @@ test('hostFor returns the host the params name, and the target when they name no
   assert.equal(hostFor(s, { account: 'a@b' }).name, 'mac')
   assert.equal(hostFor(s, undefined).name, 'mac')
   assert.equal(hostFor(s, 'devbox').name, 'mac')
+})
+
+test('an ssh alias that starts with a dash is dropped, never run as an ssh option', () => {
+  const s = mergeSettings({ hosts: [{ name: 'mac' }, { name: 'bad', ssh: '-oProxyCommand=evil' }, { name: 'devbox', ssh: 'devbox' }] })
+  assert.deepEqual(s.hosts.map((h) => h.name), ['mac', 'devbox'])
+})
+
+test('an orcaEnvironment that starts with a dash is refused: the host name is used instead', () => {
+  const s = mergeSettings({ hosts: [{ name: 'devbox', ssh: 'devbox', orcaEnvironment: '--json' }] })
+  assert.equal(s.hosts[0].orcaEnvironment, null)
+  assert.equal(environmentOf(s.hosts[0]), 'devbox')
+  assert.equal(environmentOf({ name: 'lab', ssh: 'lab', orcaEnvironment: '-x' }), 'lab')
 })
