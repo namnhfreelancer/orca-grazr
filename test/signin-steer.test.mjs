@@ -69,14 +69,13 @@ test('a tab that lands on claude.ai/new is returned to the authorize page with o
   assertCleaned(h, { dir: D1, page: 'page-1' })
 })
 
-test('a tab on the sign-in flow is never steered: the login page, its sub-pages, the magic link, the OAuth pages, the API, verify, sso and auth', async () => {
+test('a tab on the sign-in flow is never steered: the login page, its sub-pages, the OAuth pages, the API, verify, sso and auth', async () => {
   const { h, page } = tabAt()
   const login = await openRemoteTab(h, null)
   for (const url of [
     'https://claude.ai/login',
     'https://claude.ai/login?next=%2Fnew',
     'https://claude.ai/login/sso',
-    'https://claude.ai/magic-link#token',
     'https://claude.com/cai/oauth/authorize?code=1&state=s',
     'https://claude.ai/oauth/consent',
     'https://claude.ai/api/auth/callback',

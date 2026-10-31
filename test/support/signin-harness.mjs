@@ -50,6 +50,8 @@ export function harness({ settings = SETTINGS, overrides = {}, spawnThrows = nul
   const calls = []
   // The sign-in tab: open until a test closes it. A second click only switches to an open tab.
   const tab = { open: true }
+  // The sign-in tab's accessibility snapshot, as `orca snapshot` prints it. A test sets screen.snapshot for each page.
+  const screen = { snapshot: '' }
   const spawns = []
   const published = []
   const logs = []
@@ -86,6 +88,10 @@ export function harness({ settings = SETTINGS, overrides = {}, spawnThrows = nul
     // Focusing the tab and steering it back to the authorize page both succeed unless a test says otherwise.
     'tab switch': () => ({ stdout: json({ ok: true, result: {} }) }),
     'goto': () => ({ stdout: json({ ok: true, result: {} }) }),
+    // The sign-in steps: the snapshot the page shows, and fill or click answers ok unless a test says otherwise.
+    'snapshot': () => ({ stdout: json({ ok: true, result: { snapshot: screen.snapshot } }) }),
+    'fill': () => ({ stdout: json({ ok: true, result: {} }) }),
+    'click': () => ({ stdout: json({ ok: true, result: {} }) }),
   }
   const exec = async (argv, opts = {}) => {
     const call = { ...describeArgv(argv, settings), timeoutMs: opts.timeoutMs, input: opts.input }
@@ -132,7 +138,7 @@ export function harness({ settings = SETTINGS, overrides = {}, spawnThrows = nul
     loginTimeoutMs: loginTimeoutMs ?? LOGIN_TIMEOUT_MS,
     urlTimeoutMs: urlTimeoutMs ?? URL_TIMEOUT_MS,
   })
-  return { jobs, calls, spawns, published, logs, profiles, clock, clockNow, closeTab: () => { tab.open = false }, get refreshes() { return refreshes } }
+  return { jobs, calls, spawns, published, logs, profiles, clock, clockNow, screen, closeTab: () => { tab.open = false }, get refreshes() { return refreshes } }
 }
 
 // Timers are recorded, never fired by themselves; a test fires the one it means.
@@ -141,6 +147,7 @@ export function fakeClock() {
   return {
     setTimeout: (fn, ms) => { const t = { fn, ms, cleared: false, fired: false }; armed.push(t); return t },
     clearTimeout: (t) => { if (t) t.cleared = true },
+    count: (ms) => armed.filter((a) => a.ms === ms).length,
     hasTimer: (ms) => armed.some((a) => a.ms === ms && !a.cleared && !a.fired),
     fire: (ms) => {
       const t = armed.find((a) => a.ms === ms && !a.cleared && !a.fired)

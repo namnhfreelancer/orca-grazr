@@ -55,9 +55,9 @@ test('manifest declares the accounts panel and the panel-refresh command', () =>
   assert.ok(manifest.contributes.commands.some((c) => c.id === 'panel-refresh' && c.title === 'Grazr: Refresh panel'))
 })
 
-test('manifest and package declare version 0.6.9', async () => {
+test('manifest and package declare version 0.7.1', async () => {
   const pkg = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
-  assert.equal(manifest.version, '0.6.9')
-  assert.equal(pkg.version, '0.6.9')
+  assert.equal(manifest.version, '0.7.1')
+  assert.equal(pkg.version, '0.7.1')
 })
 

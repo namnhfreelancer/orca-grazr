@@ -68,7 +68,7 @@ Orca keeps the settings in `<userData>/plugins-data/senadaruc.grazr/settings.jso
 - `maxToastsPerHostPerCycle`: how many notices one host can show per drain. Extra notices collapse into one `+N more notices` toast.
 - `forceInstall`: whether `Install engine` takes over a status line that another grazr owns. It is the default for every host; a host can override it with its own `forceInstall`.
 - `panelFace`: the face every card opens with: `clock`, `dial` or `list`. The default is `clock`.
-- `panelView`: the window every card opens with: `session` (5h) or `weekly` (Week). The default is `session`.
+- `panelView`: the window every card opens with: `session` (5h) or `weekly` (Week). The default is `session`. A host whose accounts with readings are all Ultra accounts with no 5-hour limit opens on Week whatever this says.
 - `orcaBin`: the Orca CLI that opens each sign-in tab in a local Orca workspace. The default is `/usr/local/bin/orca`. A value that is blank or starts with `-` falls back to the default.
 - `signinWorkspace`: optional. The local Orca worktree the sign-in tab opens in, as an `id:<worktree id>` or `path:<folder>` selector. When it is unset, the first local worktree is used, and the plugin's own folder when it is one.
 - `signinHost`: optional. The name of a configured remote host. A sign-in for a card on this Mac logs in on it. When it is unset, the first remote host is used.
@@ -97,6 +97,10 @@ For example, a remote box named `devbox`, reached through the `ssh` alias of the
 
 A host list that includes the Mac must keep the Mac's entry with `"ssh": null` and `"notifier": "osascript"`. A comma list in `notifier` fans out to each channel, so `queue,osascript` on the Mac would show each notice twice.
 
+## Ultra accounts
+
+An Ultra account (the plan formerly called Max 20x) has no 5-hour limit under the engine's `ULTRA_NO_SESSION` setting, which is on by default (`ULTRA_NO_SESSION=1` in the host's `config.env`). With it on, the engine rotates an Ultra account on its weekly limit only, and the panel shows `no 5-hour limit (Ultra)` on its 5h views. A 5-hour limit that is still enforced on an Ultra account is caught by the failure hook, which swaps to another account. Set `ULTRA_NO_SESSION=0` to turn the rule off, so that Ultra accounts rotate on the 5-hour window too.
+
 ## Enrolling accounts
 
 `Add account…` and `Re-authenticate…` on a panel card sign in through Orca's built-in browser and enrol the account on that card's host. Nothing opens in your system browser.
@@ -105,6 +109,7 @@ How a sign-in works:
 
 - The login runs on one of your ssh hosts, in a throwaway directory there, over plain `ssh` with its stdin kept open (no pty). A card on a remote host logs in on that host. A card on this Mac logs in on `signinHost`, or on the first remote host. Without a remote host to log in on, the sign-in is refused at once.
 - The sign-in tab opens in a local Orca workspace on this Mac (`signinWorkspace`, or the first local worktree), in Orca's built-in browser, in an isolated browser profile, and is brought to the front. The start message names that workspace. A re-authentication reuses the account's profile, `grazr · <account>`. An add-account sign-in gets a fresh profile, `grazr · new account <yyyy-mm-dd hh:mm>`, which is deleted when the sign-in ends, whatever the outcome.
+- The sign-in fills in the e-mail and approves Claude Code, so you only type the code from the e-mail. A re-authentication fills in the account's e-mail, presses Continue and opens the code box, and Claude Code's consent is clicked once. An add-account sign-in leaves the e-mail to you. The plugin never fills the code box. Open the e-mail's link on another device (your phone), not in Orca's tab: a link opened there cannot sign the login in, so the tab is sent back to the start with a notice.
 - Approving in the tab sends the code back to the login by itself: the plugin reads the tab's address, and when it is Claude's code callback for this sign-in (matched by its state), it writes the code into the login's stdin, once. Nothing is copied by hand, and the code is never logged or shown.
 - A sign-in that is steered off the authorize flow is returned to it, at most five times.
 - Only an https address on claude.ai, claude.com or anthropic.com is opened. Anything else is refused and nothing is opened.
@@ -169,7 +174,7 @@ Each card, under its tab, shows:
 
 - A header line with the swap thresholds the engine reports for that host, the time the host's data last changed, and a chip for the host's state: `rotation on`, `rotation off`, `not connected`, `unreachable`, `engine not installed`, `managed profile`, `engine update available` or `another grazr owns the status line`. `not connected` means the status line or the stop hook is missing on that host, so nothing rotates there.
 - An `engine <version>` line. When the installed engine differs from the one the plugin bundles, `engine update available` appears. Run `Grazr: Install engine on target` to update it.
-- A 5h view and a Week view, switched with the buttons at the top of the card. Each view has a ring with one numbered segment per account, in rotation order. A needle marks the share used on the active account's segment, and a tick marks the swap threshold. When the engine watches per-model limits (`MODEL_LIMITS=1` in that host's `config.env`), the Week view adds an inner ring per model. An account that has a weekly reading but no 5-hour window (some plans have no 5-hour limit) reads `no 5-hour limit` on the 5h view, muted and never counted as spent, and a host where no account has a 5-hour window opens on Week whatever `panelView` says.
+- A 5h view and a Week view, switched with the buttons at the top of the card. Each view has a ring with one numbered segment per account, in rotation order. A needle marks the share used on the active account's segment, and a tick marks the swap threshold. When the engine watches per-model limits (`MODEL_LIMITS=1` in that host's `config.env`), the Week view adds an inner ring per model. An account that has a weekly reading but no 5-hour window (some plans have no 5-hour limit) reads `no 5-hour limit` on the 5h view, muted and never counted as spent, and a host where no account has a 5-hour window opens on Week whatever `panelView` says. An Ultra account with no 5-hour limit (see [Ultra accounts](#ultra-accounts)) reads `no 5-hour limit (Ultra)` on every 5h face, muted, and is never spent or skipped for its 5-hour window. A host whose accounts with readings are all such Ultra accounts opens on Week too.
 - A `Dial | Clock | List` switch. Hovering a segment shows its account, the percentage left, the swap threshold and the reset time.
 - Colours by account state: red for an account that is spent or blocked, green at reduced opacity for a parked account that still has tokens, grey for an unknown or unenrolled account, and orange and dashed for the next account.
 - One row per account, with its percentage and status: `active`, `NEXT ▸`, `spent · resets <day and time>`, `blocked: <reason>`, `not read yet` or `not enrolled`.

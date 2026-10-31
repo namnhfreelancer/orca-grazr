@@ -4,6 +4,24 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.7.1 - 2026-10-31
+
+Summarises 0.7.0 and 0.7.1. Needs the same Orca as 0.6.9, and the `orca` CLI on this Mac. The bundled engine is `0.4.7+fork.12`.
+
+### Added
+
+- The sign-in steps in Orca's tab are automated. The sign-in fills in the e-mail and approves Claude Code, so you only type the code from the e-mail. Each poll takes at most one step, read from the tab's accessibility snapshot:
+  - A re-authentication fills in the account's e-mail when it differs, then presses Continue.
+  - The link-sent page: "Enter verification code" opens the login code box. A toast then asks for the code from the e-mail, and for the e-mail's link to be opened on another device.
+  - The consent page: a button named "Authorize", "Allow" or "Approve" is clicked once.
+  - The magic-link page: the tab is sent back to the authorize page, with a toast to open the link on another device.
+- The login code box, the password fields and the Google, Apple and other buttons are never filled or clicked by the plugin. An add-account sign-in never fills the e-mail.
+
+### Changed
+
+- With the engine's `ULTRA_NO_SESSION` setting on (its default), an Ultra account rotates on its weekly limit only. The panel reads `no 5-hour limit (Ultra)` on every 5h face, muted, and the account is never spent or skipped for its 5-hour window. The list face omits its 5h bar, and a host whose accounts with readings are all such Ultra accounts opens on Week, with `Ultra: week only` in the header.
+- The engine reports each account's `ultra` field, or the plan label is read when an older engine sends none.
+
 ## 0.6.9 - 2026-10-31
 
 Summarises 0.6.4 through 0.6.9. Needs Orca 1.4.245 or later, the `orca` CLI on this Mac, a local Orca project on this Mac for the sign-in tab, and `setsid` and GNU `timeout` on each login host. The direct buttons and sign-in, and the panel's workspace-following, need an Orca with `commands.execute` (proposed in [stablyai/orca#36400](https://github.com/stablyai/orca/pull/36400)). The bundled engine is still `0.4.7+fork.11`.
