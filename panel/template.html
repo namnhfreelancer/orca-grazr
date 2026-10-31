@@ -38,22 +38,55 @@
         overflow-x: hidden;
       }
       main { display: flex; flex-direction: column; gap: 10px; }
-      .host,
-      .host-details {
+      .host {
         border: 1px solid var(--orca-border, var(--border, transparent));
         border-radius: 8px;
         padding: 12px;
         min-width: 0;
       }
-      .host-details { padding: 0; }
-      .host-details > summary {
-        padding: 8px 12px;
-        cursor: pointer;
-        font-weight: 600;
+      [hidden] { display: none !important; }
+      /* The tab strip: one tab per host. The selected tab is filled, bold and underlined; a strip wider than the sidebar scrolls sideways. */
+      .host-tabs {
+        display: flex;
+        gap: 4px;
+        overflow-x: auto;
+        margin: 0 0 8px;
+        padding: 2px 2px 4px;
+        border-bottom: 1px solid var(--orca-border, var(--border, transparent));
+        scrollbar-width: thin;
       }
-      .host-details > .host { border: 0; border-top: 1px solid var(--orca-border, var(--border, transparent)); border-radius: 0; }
+      .host-tab {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin: 0;
+        padding: 4px 9px;
+        border: 1px solid transparent;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--orca-muted-foreground, var(--muted-foreground, #999));
+        font: inherit;
+        font-size: 12px;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .host-tab:hover {
+        border-color: var(--orca-border, var(--border, transparent));
+        color: var(--orca-foreground, var(--foreground, CanvasText));
+      }
+      .host-tab[aria-selected="true"] {
+        color: var(--orca-foreground, var(--foreground, CanvasText));
+        background: var(--orca-secondary, var(--secondary, transparent));
+        border-color: var(--orca-border, var(--border, transparent));
+        font-weight: 600;
+        box-shadow: inset 0 -2px 0 var(--orca-primary, var(--primary, currentColor));
+      }
+      .host-tab:focus-visible { outline: 2px solid var(--orca-ring, var(--ring, currentColor)); outline-offset: 1px; }
+      .host-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--orca-muted-foreground, var(--muted-foreground, #999)); }
+      .host-dot.dot-on { background: var(--grazr-ok); }
+      .host-dot.dot-down { background: var(--orca-destructive, var(--destructive, #f87171)); }
       .host-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
-      .host-head h2 { margin: 0; font-size: 13px; font-weight: 600; }
       .thresholds { margin: 2px 0 0; width: 100%; font-size: 11px; color: var(--orca-muted-foreground, var(--muted-foreground, #999)); }
       .engine { margin: 0; width: 100%; font-size: 11px; color: var(--orca-muted-foreground, var(--muted-foreground, #999)); }
       .chip {
@@ -631,6 +664,81 @@
       }
       ageLines()
       setInterval(ageLines, 30000)
+
+      // The host tabs: one tab per host, and one card shown at a time. Selecting a tab marks it aria-selected with
+      // tabindex 0 (the others -1, a roving tabindex) and unhides its card. Nothing is stored: a reload selects the target.
+      function tabsOf() { return document.querySelectorAll('button.host-tab') }
+      function selectHost(name) {
+        var tabs = tabsOf()
+        var selected = null
+        tabs.forEach(function (tab) {
+          var on = tab.getAttribute('data-host') === name
+          tab.setAttribute('aria-selected', on ? 'true' : 'false')
+          tab.setAttribute('tabindex', on ? '0' : '-1')
+          if (on) selected = tab
+        })
+        if (!selected) return null
+        document.querySelectorAll('section.host').forEach(function (card) {
+          if (card.getAttribute('data-host') === name) card.removeAttribute('hidden')
+          else card.setAttribute('hidden', '')
+        })
+        return selected
+      }
+      // Left and Right move to the neighbouring tab and wrap at the ends; Home and End go to the first and the last.
+      function tabAfter(key, tab) {
+        var tabs = tabsOf()
+        var at = -1
+        tabs.forEach(function (other, i) { if (other === tab) at = i })
+        var n = tabs.length
+        if (at < 0 || n === 0) return null
+        if (key === 'ArrowRight') return tabs[(at + 1) % n]
+        if (key === 'ArrowLeft') return tabs[(at - 1 + n) % n]
+        if (key === 'Home') return tabs[0]
+        if (key === 'End') return tabs[n - 1]
+        return null
+      }
+      tabsOf().forEach(function (tab) {
+        tab.addEventListener('click', function () { selectHost(tab.getAttribute('data-host')) })
+        tab.addEventListener('keydown', function (event) {
+          var next = tabAfter(event.key, tab)
+          if (!next) return
+          event.preventDefault()
+          selectHost(next.getAttribute('data-host'))
+          next.focus()
+        })
+      })
+
+      // The panel follows the focused workspace's host. While the page is visible, every FOCUS_POLL_MS (and on load and
+      // when it becomes visible) the worker reports which host the focused workspace is on. A change of that host selects
+      // its tab and scrolls the tab strip to it; the same host again does nothing, so a tab the user picked by hand stays
+      // selected until the workspace changes. A fallback code or a timed-out call means the host has no such command: polling stops.
+      var FOCUS_POLL_MS = 4000
+      var focusHost = null
+      var focusBusy = false
+      var focusStopped = false
+      function showFocusedHost(name) {
+        var tab = selectHost(name)
+        if (tab && tab.scrollIntoView) tab.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+      }
+      function pollFocus() {
+        if (focusStopped || focusBusy || document.visibilityState !== 'visible') return
+        focusBusy = true
+        call('commands.execute', { commandId: 'active-host', params: {} }, COMMAND_TIMEOUT_MS).then(function (result) {
+          focusBusy = false
+          if (!result.ok) {
+            if (result.timedOut || FALLBACK_CODES.indexOf(result.errorCode) >= 0) focusStopped = true
+            return
+          }
+          // A worker that cannot read the session answers ok false with no host; that is quiet, and the next poll tries again.
+          var value = (result.value && result.value.value) || {}
+          if (value.ok === false || typeof value.host !== 'string' || value.host === '' || value.host === focusHost) return
+          focusHost = value.host
+          showFocusedHost(value.host)
+        })
+      }
+      pollFocus()
+      setInterval(pollFocus, FOCUS_POLL_MS)
+      document.addEventListener('visibilitychange', pollFocus)
 
       document.getElementById('stamp').textContent = 'Cmd-J Grazr: Refresh panel'
 

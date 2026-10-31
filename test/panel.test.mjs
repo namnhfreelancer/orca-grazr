@@ -78,13 +78,14 @@ test('renderCard escapes a name like o\'brien $x in text and in data-text', () =
   assert.equal(html.includes("swap o'brien"), false)
 })
 
-test('renderCard marks the target open and wraps other hosts in details', () => {
+test('renderCard shows the selected host card and hides the others', () => {
   const [mac, dev] = panelOf(report()).hosts
   const open = renderCard({ ...mac, open: true }, {})
-  assert.ok(open.startsWith('<section class="host" data-host="mac"'))
+  assert.ok(open.startsWith('<section role="tabpanel" class="host" data-host="mac"'))
+  assert.equal(open.split('>')[0].includes(' hidden'), false)
   const closed = renderCard({ ...dev, open: false }, {})
-  assert.ok(closed.startsWith('<details'))
-  assert.ok(closed.includes('<section'))
+  assert.ok(closed.startsWith('<section role="tabpanel" class="host" data-host="devbox"'))
+  assert.ok(closed.split('>')[0].includes(' hidden'))
 })
 
 test('renderCard gives an active blocked row the re-authenticate button', () => {
@@ -113,7 +114,10 @@ test('renderPanel replaces both markers and the result is under 256 KiB', () => 
   assert.equal(html.includes('<!--__CARDS__-->'), false)
   assert.equal(html.includes('/*__DATA__*/'), false)
   assert.ok(html.includes('"target":"mac"'))
-  assert.equal(html.split('<details').length - 1, 1)
+  // Every host has a tab and a card; only the target's card is shown.
+  assert.equal(html.split('role="tab"').length - 1, 2)
+  assert.equal(html.split('<section role="tabpanel"').length - 1, 2)
+  assert.equal(html.split(' hidden>').length - 1, 1)
   assert.ok(Buffer.byteLength(html) < 256 * 1024)
 })
 
@@ -443,14 +447,14 @@ test('renderPanel escapes an engine version that carries markup and quotes, in t
   assert.equal(html.includes('engine update available'), false)
 })
 
-test('a non-target outdated card says to target through to it, and its summary shows the engine chip', () => {
+test('a non-target outdated card says to target through to it, and its head shows the engine chip', () => {
   const host = { ...reachableHost({ ...report(), version: '0.4.7+fork.5' }, '0.4.7+fork.6'), open: false }
   const html = renderCard(host, {})
   assert.ok(html.includes('Grazr: Target → next host until mac, then Grazr: Install engine on target</p>'))
-  assert.ok(html.includes('<summary>mac <span class="chip chip-on">rotation on</span><span class="chip chip-outdated">engine update available</span></summary>'))
+  assert.ok(html.includes('<header class="host-head"><span class="chip chip-on">rotation on</span><span class="chip chip-outdated">engine update available</span>'))
 })
 
-test('the target outdated card keeps the install message, and a current non-target summary has no engine chip', () => {
+test('the target outdated card keeps the install message, and a current non-target head has no engine chip', () => {
   const target = renderCard({ ...reachableHost({ ...report(), version: '0.4.7+fork.5' }, '0.4.7+fork.6'), open: true }, {})
   assert.ok(target.includes('Grazr: Install engine on target</p>'))
   assert.ok(!target.includes('Target → next host'))

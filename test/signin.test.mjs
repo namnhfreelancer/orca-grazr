@@ -1,25 +1,24 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { loginHostFor, clip, LINE_MAX, LOGIN_TIMEOUT_MS, URL_TIMEOUT_MS } from '../lib/signin.mjs'
-import { mergeSettings } from '../lib/hosts.mjs'
 import { fixtureSettings } from './support/fixture-hosts.mjs'
-import { D1, D2, DEV, EXPORT_LINE, MAC, NO_LOGIN_HOST, OK_ENROL, ORCA, SETTINGS, SSH, STAMP, URL, argAfter, assertCleaned, callsWith, closesOf, deletesOf, discardsOf, harness, json, openRemoteTab, until, LABEL } from './support/signin-harness.mjs'
+import { D1, D2, DEV, EXPORT_LINE, MAC, OK_ENROL, ORCA, SETTINGS, SSH, STAMP, URL, WORKSPACE, argAfter, assertCleaned, callsWith, closesOf, deletesOf, discardsOf, harness, json, openRemoteTab, until, LABEL } from './support/signin-harness.mjs'
 
 test('a remote card signs in on its own host: the login runs there in a throwaway dir, opens in that environment, enrols there and is discarded', async () => {
   const h = harness()
-  assert.deepEqual(h.jobs.start({ host: DEV, settings: SETTINGS, account: null }), { ok: true, message: "Sign in to a new account in Orca's browser (devbox)" })
+  assert.deepEqual(await h.jobs.start({ host: DEV, settings: SETTINGS, account: null }), { ok: true, message: "Signing in a new account in Orca's browser — sign in, then approve Claude Code" })
   await until(() => h.spawns.length === 1)
   const [login] = h.spawns
   assert.equal(login.file, SSH)
-  assert.deepEqual(login.args.slice(0, -1), ['-tt', ...SETTINGS.sshOptions, 'devbox'])
-  assert.equal(login.args.at(-1), `CLAUDE_CONFIG_DIR=${D1} timeout 630 ~/.local/bin/claude auth login`)
+  assert.deepEqual(login.args.slice(0, -1), [...SETTINGS.sshOptions, 'devbox'])
+  assert.equal(login.args.at(-1), `CLAUDE_CONFIG_DIR=${D1} setsid sh -c 'echo grazr-pid:$$; exec timeout -k 5 1830 ~/.local/bin/claude auth login'`)
   login.child.emitUrl()
   await until(() => callsWith(h, 'tab create').length === 1)
   const create = callsWith(h, 'tab create')[0]
   assert.equal(create.bin, ORCA)
-  assert.deepEqual(create.args.slice(0, 8), ['tab', 'create', '--environment', 'devbox', '--url', URL, '--profile', 'p1'])
+  assert.deepEqual(create.args.slice(0, 8), ['tab', 'create', '--worktree', WORKSPACE, '--url', URL, '--profile', 'p1'])
   assert.equal(create.args.at(-1), '--json')
-  assert.deepEqual(callsWith(h, 'tab profile create')[0].args.slice(0, 9), ['tab', 'profile', 'create', '--environment', 'devbox', '--label', `${LABEL}`, '--scope', 'isolated'])
+  assert.deepEqual(callsWith(h, "tab profile create")[0].args.slice(0, 7), ['tab', 'profile', 'create', '--label', `${LABEL}`, '--scope', 'isolated'])
   login.child.exit(0)
   await until(() => h.published.length === 1 && h.refreshes === 1)
   assert.equal(h.published[0].title, 'devbox: signed in')
@@ -32,8 +31,8 @@ test('a remote card signs in on its own host: the login runs there in a throwawa
   assert.equal(h.calls.filter((c) => c.where === 'local').length, 0, 'the Mac runs nothing')
   assert.equal(callsWith(h, 'login-export')[0].where, 'devbox', 'the e-mail is read on the login host')
   assertCleaned(h, { dir: D1, page: 'page-1' })
-  assert.equal(closesOf(h, 'page-1')[0].args.includes('--environment'), true)
-  assert.deepEqual(deletesOf(h).map((c) => c.args.slice(3, 7)), [['--environment', 'devbox', '--profile', 'p1']], 'the fresh profile is deleted')
+  assert.equal(closesOf(h, 'page-1')[0].args.includes('--environment'), false)
+  assert.deepEqual(deletesOf(h).map((c) => c.args.slice(3, 7)), [['--profile', 'p1', '--json']], 'the fresh profile is deleted')
   assert.equal(deletesOf(h)[0].args.at(-1), '--json')
   assert.ok(h.calls.findIndex((c) => c.line.includes('tab profile delete')) > h.calls.findIndex((c) => c.line.includes('tab close')), 'deleted after its tab closes')
 })
@@ -42,7 +41,7 @@ test('a re-authentication passes the account as --email, labels its profile by t
   const h = harness()
   h.profiles.push({ id: 'prof-7', label: 'grazr · a@example.com' })
   const login = await openRemoteTab(h, 'a@example.com')
-  assert.equal(h.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${D1} timeout 630 ~/.local/bin/claude auth login --email a@example.com`)
+  assert.equal(h.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${D1} setsid sh -c 'echo grazr-pid:$$; exec timeout -k 5 1830 ~/.local/bin/claude auth login --email a@example.com'`)
   assert.equal(callsWith(h, 'tab profile create').length, 0, 'the existing profile for the account is reused')
   assert.equal(deletesOf(h).length, 0, 'a re-authentication profile is never deleted')
   assert.equal(argAfter(callsWith(h, 'tab create')[0], '--profile'), 'prof-7')
@@ -55,12 +54,12 @@ test('a re-authentication passes the account as --email, labels its profile by t
 
 test('a Mac card signs in on the first remote host with an environment, and the export reaches the Mac engine only as its stdin', async () => {
   const h = harness()
-  assert.deepEqual(h.jobs.start({ host: MAC, settings: SETTINGS, account: 'x@example.com' }), { ok: true, message: "Sign in to x@example.com in Orca's browser (devbox)" })
+  assert.deepEqual(await h.jobs.start({ host: MAC, settings: SETTINGS, account: 'x@example.com' }), { ok: true, message: "Signing in x@example.com in Orca's browser — sign in, then approve Claude Code" })
   await until(() => h.spawns.length === 1)
   assert.equal(h.spawns[0].args.at(-2), 'devbox')
   h.spawns[0].child.emitUrl()
   await until(() => callsWith(h, 'tab create').length === 1)
-  assert.equal(argAfter(callsWith(h, 'tab create')[0], '--environment'), 'devbox')
+  assert.equal(argAfter(callsWith(h, 'tab create')[0], '--worktree'), WORKSPACE)
   h.spawns[0].child.exit(0)
   await until(() => h.refreshes === 1)
   const stdin = callsWith(h, 'enrol --stdin')
@@ -86,37 +85,39 @@ test('the export and the credential reach no argv, log or toast', async () => {
   assert.equal(JSON.stringify(h.spawns.map((s) => s.args)).includes('sk-secret'), false)
 })
 
-test('signinHost names the login host for a Mac card, and its environment is the one the tab opens in', async () => {
+test('signinHost is the login host for a Mac card when it is a remote host, else the first remote host; the card\'s own host logs in itself', async () => {
+  assert.equal(loginHostFor(fixtureSettings({ signinHost: 'devbox-2' }), MAC).name, 'devbox-2')
+  assert.equal(loginHostFor(fixtureSettings({ signinHost: 'mac' }), MAC).name, 'devbox', 'a local signinHost is skipped')
+  assert.equal(loginHostFor(fixtureSettings({ signinHost: 'missing' }), MAC).name, 'devbox')
+  assert.equal(loginHostFor(fixtureSettings({}), DEV), DEV, 'a remote card logs in on its own host')
+  assert.equal(loginHostFor(fixtureSettings({ hosts: [{ name: 'mac' }] }), MAC), null)
   const settings = fixtureSettings({ signinHost: 'devbox-2' })
-  assert.equal(loginHostFor(settings, MAC).name, 'devbox-2')
   const h = harness({ settings })
-  h.jobs.start({ host: settings.hosts[0], settings, account: null })
+  await h.jobs.start({ host: settings.hosts[0], settings, account: null })
   await until(() => h.spawns.length === 1)
   assert.equal(h.spawns[0].args.at(-2), 'devbox-2')
-  assert.equal(loginHostFor(fixtureSettings({ signinHost: 'mac' }), MAC), null, 'a local signinHost is refused')
-  assert.equal(loginHostFor(fixtureSettings({ signinHost: 'missing' }), MAC), null)
 })
 
-test('no remote host with an environment: the sign-in is refused at once and nothing runs', () => {
-  const settings = mergeSettings({ hosts: [{ name: 'mac' }] })
+test('no remote host to log in on: the sign-in is refused at once and nothing runs', async () => {
+  const settings = fixtureSettings({ hosts: [{ name: 'mac' }] })
   const h = harness({ settings })
-  assert.deepEqual(h.jobs.start({ host: settings.hosts[0], settings, account: null }), { ok: false, message: NO_LOGIN_HOST })
+  assert.deepEqual(await h.jobs.start({ host: settings.hosts[0], settings, account: null }), { ok: false, message: 'Sign-in needs a remote host to log in on' })
   assert.equal(h.calls.length + h.spawns.length, 0)
   assert.equal(h.jobs.running.size, 0)
 })
 
-test('an account name that starts with a dash is refused before anything runs', () => {
+test('an account name that starts with a dash is refused before anything runs', async () => {
   const h = harness()
-  assert.equal(h.jobs.start({ host: DEV, settings: SETTINGS, account: '--help' }).ok, false)
+  assert.equal((await h.jobs.start({ host: DEV, settings: SETTINGS, account: '--help' })).ok, false)
   assert.equal(h.calls.length + h.spawns.length, 0)
 })
 
 test('the Claude binary is the host setting, and the Orca CLI is the orcaBin setting', async () => {
-  const settings = mergeSettings({ orcaBin: '/opt/orca', hosts: [{ name: 'mac' }, { name: 'devbox', ssh: 'devbox', claudeBin: '/opt/bin/claude' }] })
+  const settings = fixtureSettings({ orcaBin: '/opt/orca', hosts: [{ name: 'mac' }, { name: 'devbox', ssh: 'devbox', claudeBin: '/opt/bin/claude' }] })
   const h = harness({ settings })
   h.jobs.start({ host: settings.hosts[1], settings, account: null })
   await until(() => h.spawns.length === 1)
-  assert.equal(h.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${D1} timeout 630 /opt/bin/claude auth login`)
+  assert.equal(h.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${D1} setsid sh -c 'echo grazr-pid:$$; exec timeout -k 5 1830 /opt/bin/claude auth login'`)
   h.spawns[0].child.emitUrl()
   await until(() => callsWith(h, 'tab create').length === 1)
   assert.ok(h.calls.filter((c) => c.where === 'orca').length >= 2)
@@ -236,7 +237,7 @@ test('an absolute directory with characters the shell would split is passed quot
   const h = harness({ overrides: { 'mktemp -d': () => ({ stdout: `${dir}\n` }) } })
   h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
   await until(() => h.spawns.length === 1)
-  assert.equal(h.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR='${dir}' timeout 630 ~/.local/bin/claude auth login`)
+  assert.equal(h.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR='${dir}' setsid sh -c 'echo grazr-pid:$$; exec timeout -k 5 1830 ~/.local/bin/claude auth login'`)
   h.spawns[0].child.exit(null, '', 'SIGTERM')
   await until(() => h.refreshes === 1)
 })
@@ -252,8 +253,9 @@ test('a login that cannot be started: the toast says so, and the login directory
 test('a second start on the same card cancels the running sign-in, discards its login, closes its tab, then starts; one login runs at a time', async () => {
   const h = harness()
   const first = await openRemoteTab(h, null)
-  const second = h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
-  assert.deepEqual(second, { ok: true, message: "Sign in to a new account in Orca's browser (devbox)" })
+  h.closeTab() // the sign-in tab is gone: a new start restarts
+  const second = await h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  assert.deepEqual(second, { ok: true, message: "Signing in a new account in Orca's browser — sign in, then approve Claude Code" })
   assert.deepEqual(first.signals, ['SIGTERM'])
   assert.equal(h.spawns.length, 1, 'the new sign-in waits for the cancelled one to release its login')
   first.exit(null, '', 'SIGTERM')
@@ -263,7 +265,7 @@ test('a second start on the same card cancels the running sign-in, discards its 
   assert.equal(discardsOf(h, D1).length, 1)
   assert.equal(closesOf(h, 'page-1').length, 1)
   assert.equal(h.jobs.running.has('devbox'), true, 'the card stays held for the new sign-in')
-  assert.equal(h.spawns[1].args.at(-1), `CLAUDE_CONFIG_DIR=${D2} timeout 630 ~/.local/bin/claude auth login`)
+  assert.equal(h.spawns[1].args.at(-1), `CLAUDE_CONFIG_DIR=${D2} setsid sh -c 'echo grazr-pid:$$; exec timeout -k 5 1830 ~/.local/bin/claude auth login'`)
   h.spawns[1].child.emitUrl()
   await until(() => callsWith(h, 'tab create').length === 2)
   h.spawns[1].child.exit(0)

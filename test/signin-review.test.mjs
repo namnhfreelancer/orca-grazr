@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { randomBytes } from 'node:crypto'
-import { isSignInUrl, LOGIN_TIMEOUT_MS, REMOTE_LOGIN_TIMEOUT_S } from '../lib/signin.mjs'
+import { isSignInUrl, LOGIN_TIMEOUT_MS, REMOTE_KILL_AFTER_S, REMOTE_LOGIN_TIMEOUT_S } from '../lib/signin.mjs'
 import { DEV, MAC, SETTINGS, SSH, D1, LABEL, URL, VISIT, argAfter, callsWith, closesOf, deletesOf, harness, json, singleLine, openRemoteTab, until } from './support/signin-harness.mjs'
 
 test('Orca pretty-printed JSON replies parse, and a single-line reply still parses', async () => {
@@ -19,17 +19,16 @@ test('Orca pretty-printed JSON replies parse, and a single-line reply still pars
   await until(() => oneLine.refreshes === 1)
 })
 
-test('the remote login runs under ssh -tt, wrapped in timeout(1), so hanging up the connection ends it on the remote', async () => {
+test('the remote login runs over plain ssh (no pty), in its own process group, under timeout(1) that kills claude after TERM', async () => {
   const h = harness()
   h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
   await until(() => h.spawns.length === 1)
   const { file, args } = h.spawns[0]
   assert.equal(file, SSH)
-  assert.equal(args[0], '-tt')
-  assert.deepEqual(args.slice(1, -2), SETTINGS.sshOptions)
+  assert.deepEqual(args.slice(0, -2), SETTINGS.sshOptions, 'no -t: a pty made claude print nothing')
   assert.equal(args.at(-2), 'devbox')
-  assert.equal(args.at(-1), `CLAUDE_CONFIG_DIR=${D1} timeout ${REMOTE_LOGIN_TIMEOUT_S} ~/.local/bin/claude auth login`)
-  assert.equal(REMOTE_LOGIN_TIMEOUT_S, 630)
+  assert.equal(args.at(-1), `CLAUDE_CONFIG_DIR=${D1} setsid sh -c 'echo grazr-pid:$$; exec timeout -k ${REMOTE_KILL_AFTER_S} ${REMOTE_LOGIN_TIMEOUT_S} ~/.local/bin/claude auth login'`)
+  assert.equal(REMOTE_LOGIN_TIMEOUT_S, 1830)
   h.spawns[0].child.exit(null, '', 'SIGTERM')
   await until(() => h.refreshes === 1)
 })
@@ -131,7 +130,7 @@ test('a fresh profile is recorded as soon as Orca makes it: cancelling during th
   await until(() => h.spawns.length === 1)
   h.spawns[0].child.emitUrl()
   await until(() => callsWith(h, 'tab profile create').length === 1)
-  h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  await h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
   assert.deepEqual(h.spawns[0].child.signals, ['SIGTERM'])
   open()
   await until(() => h.spawns[0].child.signals.length === 1)
@@ -159,7 +158,7 @@ test('when the list after the create fails, the fresh profile is found again by 
   h.spawns[0].child.exit(0)
   await until(() => h.refreshes === 1)
   assert.equal(argAfter(deletesOf(h)[0], '--profile'), 'p1')
-  assert.equal(h.published[0].body, 'Orca\'s browser on devbox could not open the sign-in: busy\nNothing was enrolled.')
+  assert.equal(h.published[0].body, 'Orca\'s browser in the account-autoswitch workspace could not open the sign-in: busy\nNothing was enrolled.')
   assert.deepEqual(h.profiles, [])
 })
 

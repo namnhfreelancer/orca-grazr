@@ -32,10 +32,12 @@ function makeElement(tag, doc) {
     text: '',
     disabled: false,
     style: {},
-    tabIndex: -1,
     doc,
     getAttribute: (name) => (node.attrs.has(name) ? node.attrs.get(name) : null),
     setAttribute: (name, value) => node.attrs.set(name, String(value)),
+    removeAttribute: (name) => { node.attrs.delete(name) },
+    // focus() records the element, so a test can see which tab the arrow keys moved to.
+    focus: () => { doc.focused = node },
     addEventListener: (type, fn) => { (node.listeners[type] ||= []).push(fn) },
     closest(selector) {
       const sel = parseSelector(selector)
@@ -84,10 +86,26 @@ function makeElement(tag, doc) {
   return node
 }
 
+// A tab for the page, as the renderer draws it: selected when the card is the selected one.
+function buildTab(doc, card, selected, slot) {
+  const tab = doc.createElement('button')
+  tab.classList.add('host-tab')
+  tab.setAttribute('role', 'tab')
+  tab.setAttribute('data-host', card.name)
+  tab.setAttribute('id', `host-tab-${slot}`)
+  tab.setAttribute('aria-selected', selected ? 'true' : 'false')
+  tab.setAttribute('tabindex', selected ? '0' : '-1')
+  tab.textContent = card.name
+  return tab
+}
+
 // A card for the page: its buttons carry the data the template reads. Each button is { kind, command, params, text, label }.
-function buildCard(doc, card) {
+// As the renderer does, the card is the tabpanel of its tab, and it carries the hidden attribute unless it is the selected one.
+function buildCard(doc, card, selected) {
   const section = doc.createElement('section')
   section.classList.add('host')
+  section.setAttribute('role', 'tabpanel')
+  if (!selected) section.setAttribute('hidden', '')
   section.setAttribute('data-host', card.name)
   section.setAttribute('data-view', 'session')
   section.setAttribute('data-face', 'list')
@@ -107,17 +125,19 @@ function buildCard(doc, card) {
   return section
 }
 
-// Loads the page with the given data: { generatedAt, target, cards: [{ name, buttons }] }, or no cards for the placeholder.
+// Loads the page with the given data: { generatedAt, target, cards: [{ name, buttons, open }] }, or no cards for the placeholder.
+// visible sets document.visibilityState; the default is hidden, so a test of another behaviour sends no focus poll.
 // transport 'post' gives the page the older postMessage bridge; 'frame' gives it window.orca.host.call (Orca 1.4.245+).
 // Results are given as the host reports them: { ok: true, value } or { ok: false, errorCode, error }. The frame
 // transport resolves with the value, or rejects with an error that carries code and message.
 // Returns: calls (what the page asked for), respond(index, result), fireTimers(ms), click(button), cardOf(name),
 // buttonOf(name, kind), stamp, and flush() to let the page's promise callbacks run.
-export async function loadPage({ generatedAt = null, cards = [], html = null, transport = 'post' } = {}) {
+export async function loadPage({ generatedAt = null, cards = [], html = null, transport = 'post', visible = false } = {}) {
   const source = html ?? await readFile(TEMPLATE_PATH, 'utf8')
   const script = source.slice(source.indexOf('<script>') + '<script>'.length, source.indexOf('</script>'))
   const doc = {
     listeners: {},
+    visibilityState: visible ? 'visible' : 'hidden',
     createElement: (tag) => makeElement(tag, doc),
     createTextNode: (text) => ({ textContent: String(text) }),
     addEventListener: (type, fn) => { (doc.listeners[type] ||= []).push(fn) },
@@ -131,12 +151,19 @@ export async function loadPage({ generatedAt = null, cards = [], html = null, tr
   doc.body.appendChild(stamp)
   doc.body.appendChild(makeElement('div', doc)).classList.add('tip')
   const main = doc.body.appendChild(makeElement('main', doc))
-  for (const card of cards) main.appendChild(buildCard(doc, card))
+  // As the renderer does, the target (the first card unless one is marked open) is the selected host.
+  const selected = cards.find((card) => card.open) ?? cards[0]
+  const nav = main.appendChild(makeElement('nav', doc))
+  nav.setAttribute('role', 'tablist')
+  nav.classList.add('host-tabs')
+  cards.forEach((card, slot) => nav.appendChild(buildTab(doc, card, card === selected, slot)))
+  for (const card of cards) main.appendChild(buildCard(doc, card, card === selected))
 
   const calls = []
   const messageListeners = []
   const frameWaiters = []
   const timers = []
+  const intervals = []
   // The page's objects live in the vm's realm; a JSON copy makes them plain host objects for the assertions.
   const copy = (value) => JSON.parse(JSON.stringify(value))
   const win = {
@@ -170,7 +197,7 @@ export async function loadPage({ generatedAt = null, cards = [], html = null, tr
     Promise,
     setTimeout: (fn, ms) => { const t = { fn, ms, done: false }; timers.push(t); return t },
     clearTimeout: (t) => { if (t) t.done = true },
-    setInterval: () => 0,
+    setInterval: (fn, ms) => { const t = { fn, ms }; intervals.push(t); return t },
     clearInterval: () => {},
   }
   vm.createContext(sandbox)
@@ -180,6 +207,7 @@ export async function loadPage({ generatedAt = null, cards = [], html = null, tr
   return {
     calls,
     stamp,
+    doc,
     main,
     async respond(index, result) {
       if (transport === 'frame') {
@@ -192,6 +220,17 @@ export async function loadPage({ generatedAt = null, cards = [], html = null, tr
       }
       await flush()
     },
+    // Runs every interval of ms once, as the clock would: the page's poll and its redraws are intervals.
+    async fireIntervals(ms) {
+      for (const t of intervals.filter((x) => x.ms === ms)) t.fn()
+      await flush()
+    },
+    // Changes the page's visibility and fires visibilitychange, as Orca does when the panel is shown or hidden.
+    async setVisibility(state) {
+      doc.visibilityState = state
+      for (const fn of doc.listeners.visibilitychange ?? []) fn({ type: 'visibilitychange' })
+      await flush()
+    },
     // Runs the pending timers of at least ms: a page call's timeout fires after its own length.
     async fireTimers(ms) {
       for (const t of timers.filter((x) => !x.done && x.ms === ms)) { t.done = true; t.fn() }
@@ -201,8 +240,18 @@ export async function loadPage({ generatedAt = null, cards = [], html = null, tr
       for (const fn of button.listeners.click ?? []) fn()
       await flush()
     },
+    // Dispatches a keydown on an element and reports whether the page prevented its default.
+    async key(element, key) {
+      let prevented = false
+      for (const fn of element.listeners.keydown ?? []) fn({ key, preventDefault: () => { prevented = true } })
+      await flush()
+      return prevented
+    },
+    focused: () => doc.focused ?? null,
     flush,
     cardOf: (name) => doc.body.querySelectorAll('section.host').find((s) => s.getAttribute('data-host') === name),
     buttonOf: (name, kind) => doc.body.querySelectorAll(`button.act-${kind}`).find((b) => b.closest('section.host')?.getAttribute('data-host') === name) ?? null,
+    tabOf: (name) => doc.body.querySelectorAll('button.host-tab').find((t) => t.getAttribute('data-host') === name) ?? null,
+    tabs: () => doc.body.querySelectorAll('button.host-tab'),
   }
 }

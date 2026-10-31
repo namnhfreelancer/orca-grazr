@@ -4,6 +4,28 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.6.9 - 2026-10-31
+
+Summarises 0.6.4 through 0.6.9. Needs Orca 1.4.245 or later, the `orca` CLI on this Mac, a local Orca project on this Mac for the sign-in tab, and `setsid` and GNU `timeout` on each login host. The direct buttons and sign-in, and the panel's workspace-following, need an Orca with `commands.execute` (proposed in [stablyai/orca#36400](https://github.com/stablyai/orca/pull/36400)). The bundled engine is still `0.4.7+fork.11`.
+
+### Changed
+
+- Sign-in uses Claude's manual flow. The login runs on one of your ssh hosts (a remote card's own host; for a Mac card, `signinHost`, else the first remote host) over plain ssh, with its stdin kept open. The approval page redirects to Claude's code callback, and the plugin relays the code into that login by itself. The code is written once, never logged or shown, and only for a callback whose state matches the sign-in's own.
+- The sign-in tab opens in a local Orca workspace on this Mac, so the browser is visible in the Orca window. The workspace is set by `signinWorkspace`, else the first local worktree, else the plugin's own folder. Without a local worktree the sign-in is refused with a message that says to add a project.
+- Once the sign-in tab opens it is brought to the front, and a tab that leaves the authorize flow is steered back to it, at most 5 times per sign-in.
+- A second click for the same account switches to its open tab instead of starting another sign-in.
+- A sign-in has a 30-minute window. The remote login runs under `timeout -k 5 1830`.
+- A cancelled, failed or timed-out sign-in stops the remote login's whole process group, since Claude ignores TERM and a dropped connection does not reach it.
+- The Claude Accounts panel follows the focused workspace's host. Every 4 seconds while it is visible, it asks which host the focused workspace is on, read from Orca's profile database with `sqlite3 -readonly`, and selects that host's tab when the host changes. A failed read leaves the panel as it is.
+- The panel shows one tab per server in a strip across the top, each with a status dot. One host's card shows at a time. Left and Right (Home and End) move between the tabs, and the strip scrolls sideways when there are more hosts than fit.
+- New settings: `signinWorkspace`, `orcaProfileDb` (default `~/Library/Application Support/orca/profiles/local-default/profile-state.db`), `sqliteBin` (default `/usr/bin/sqlite3`), and a `signinHost` that a Mac card logs in on. The `active-host` command (`Grazr: Show the focused workspace's host`) toasts the focused host.
+- The `orcaEnvironment` setting no longer selects where a sign-in opens. It still names the Orca environment a remote host is paired as, which the panel uses to match a workspace to its host.
+
+### Fixed
+
+- A cancelled sign-in left the remote login running until its timeout. The process group kill above ends it at once.
+- A sign-in that signs in as a different account enrols nothing, and says which account signed in.
+
 ## 0.6.3 - 2026-10-31
 
 Needs Orca 1.4.245 or later, the `orca` CLI on this Mac, and a paired Orca environment for each remote host that signs in. The bundled engine is still `0.4.7+fork.11`.

@@ -323,7 +323,7 @@ test('an unreachable host has no list block', () => {
 test('a page renders the list card for the list face through renderPanel', () => {
   const data = buildPanelData({ settings: { hosts: [{ name: 'mac' }], target: 'mac', panelFace: 'list' }, now: NOW, timeZone: TZ, hosts: [{ host: { name: 'mac' }, result: { ok: true, value: fixture() } }] })
   const html = renderPanel(data, { template: '<!--__CARDS__--><script>/*__DATA__*/</script>', timeZone: TZ, clockSource: '' })
-  assert.ok(html.includes('<section class="host" data-host="mac" data-view="session" data-face="list">'))
+  assert.ok(html.includes('<section role="tabpanel" class="host" data-host="mac" id="host-panel-0" aria-labelledby="host-tab-0" data-view="session" data-face="list">'))
 })
 
 test('a placeholder is listed by definition: its markup has the not enrolled chip and no Not in ACCOUNTS chip', () => {

@@ -93,7 +93,12 @@ test('status returns ok and the per-host texts it toasted', async () => {
 
 // The login host creates its throwaway directory here; every other call goes to the route given.
 const TEMP = '/var/folders/t/tmp.1'
-const withTemp = (route = engine({})) => (argv, opts) => (argv.at(-1) === 'mktemp -d' ? { stdout: `${TEMP}\n` } : route(argv, opts))
+const withTemp = (route = engine({})) => (argv, opts) => {
+  if (argv.at(-1) === 'mktemp -d') return { stdout: `${TEMP}\n` }
+  // The local workspace the sign-in tab opens in: one local worktree.
+  if (argv[argv.indexOf('worktree') + 1] === 'list') return { code: 0, stdout: JSON.stringify({ ok: true, result: { worktrees: [{ id: 'fc5::/p/account-autoswitch', path: '/p/account-autoswitch', repo: { displayName: 'account-autoswitch' } }] } }) }
+  return route(argv, opts)
+}
 // A sign-in reaches its login child once the ssh child is spawned; the spawn happens after the command returns.
 const waitForSpawns = async (fake, n) => {
   for (let i = 0; i < 200 && fake.spawns.length < n; i++) await new Promise((resolve) => setImmediate(resolve))
@@ -102,22 +107,22 @@ const waitForSpawns = async (fake, n) => {
 test('enrol with params starts a sign-in on that host and returns at once with its message, opening no Terminal', async () => {
   const fake = await start({ route: withTemp() })
   const outcome = await call(fake, 'enrol', { host: 'devbox', account: 'x@y' })
-  assert.deepEqual(outcome, { ok: true, message: "Sign in to x@y in Orca's browser (devbox)" })
+  assert.deepEqual(outcome, { ok: true, message: "Signing in x@y in Orca's browser — sign in, then approve Claude Code" })
   assert.equal(fake.execs.some((a) => a[0] === '/usr/bin/open'), false)
   await waitForSpawns(fake, 1)
   assert.equal(fake.spawns.length, 1)
   assert.equal(fake.spawns[0].file, '/usr/bin/ssh')
   assert.equal(fake.spawns[0].args.at(-2), 'devbox')
-  assert.equal(fake.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${TEMP} timeout 630 ~/.local/bin/claude auth login --email x@y`)
+  assert.equal(fake.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${TEMP} setsid sh -c 'echo grazr-pid:$$; exec timeout -k 5 1830 ~/.local/bin/claude auth login --email x@y'`)
 })
 
 test('enrol on the Mac with no account says it will sign in to a new account, on the first remote host with an environment', async () => {
   const fake = await start({ route: withTemp() })
   const outcome = await call(fake, 'enrol', { host: 'mac' })
-  assert.equal(outcome.message, "Sign in to a new account in Orca's browser (devbox)")
+  assert.equal(outcome.message, "Signing in a new account in Orca's browser — sign in, then approve Claude Code")
   await waitForSpawns(fake, 1)
   assert.equal(fake.spawns[0].args.at(-2), 'devbox')
-  assert.equal(fake.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${TEMP} timeout 630 ~/.local/bin/claude auth login`)
+  assert.equal(fake.spawns[0].args.at(-1), `CLAUDE_CONFIG_DIR=${TEMP} setsid sh -c 'echo grazr-pid:$$; exec timeout -k 5 1830 ~/.local/bin/claude auth login'`)
 })
 
 test('a second enrol for the same host cancels the running sign-in and starts the new one once the first has released its login', async () => {
@@ -125,7 +130,7 @@ test('a second enrol for the same host cancels the running sign-in and starts th
   await call(fake, 'enrol', { host: 'devbox' })
   await waitForSpawns(fake, 1)
   const again = await call(fake, 'enrol', { host: 'devbox' })
-  assert.deepEqual(again, { ok: true, message: "Sign in to a new account in Orca's browser (devbox)" })
+  assert.deepEqual(again, { ok: true, message: "Signing in a new account in Orca's browser — sign in, then approve Claude Code" })
   assert.deepEqual(fake.spawns[0].child.killed, ['SIGTERM'])
   fake.spawns[0].child.emit('close', null, 'SIGTERM')
   await waitForSpawns(fake, 2)

@@ -12,10 +12,10 @@ test('manifest identifies the grazr plugin', () => {
   assert.equal(manifest.publisher, 'senadaruc')
 })
 
-test('manifest declares exactly eleven commands with unique ids', () => {
+test('manifest declares exactly twelve commands with unique ids', () => {
   const ids = manifest.contributes.commands.map((c) => c.id)
-  assert.equal(ids.length, 11)
-  assert.equal(new Set(ids).size, 11)
+  assert.equal(ids.length, 12)
+  assert.equal(new Set(ids).size, 12)
 })
 
 test('only enrol and status-terminal are worktree-scoped', () => {
@@ -55,9 +55,9 @@ test('manifest declares the accounts panel and the panel-refresh command', () =>
   assert.ok(manifest.contributes.commands.some((c) => c.id === 'panel-refresh' && c.title === 'Grazr: Refresh panel'))
 })
 
-test('manifest and package declare version 0.6.3', async () => {
+test('manifest and package declare version 0.6.9', async () => {
   const pkg = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
-  assert.equal(manifest.version, '0.6.3')
-  assert.equal(pkg.version, '0.6.3')
+  assert.equal(manifest.version, '0.6.9')
+  assert.equal(pkg.version, '0.6.9')
 })
 

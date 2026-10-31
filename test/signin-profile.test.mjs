@@ -47,7 +47,8 @@ test('a fresh profile is deleted when the sign-in fails after it was made', asyn
 test('a fresh profile is deleted when the sign-in is cancelled, and a failed delete is logged, not thrown', async () => {
   const h = harness({ overrides: { 'tab profile delete': () => ({ code: 1, stdout: json({ ok: false, error: { message: 'profile busy' } }) }) } })
   const first = await openRemoteTab(h, null)
-  h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
+  h.closeTab() // the sign-in tab is gone: a new start restarts
+  await h.jobs.start({ host: DEV, settings: SETTINGS, account: null })
   first.exit(null, '', 'SIGTERM')
   await until(() => h.published.length === 1 && h.refreshes === 1)
   assert.equal(deletesOf(h).length, 1)

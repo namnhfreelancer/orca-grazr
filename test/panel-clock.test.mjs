@@ -98,7 +98,7 @@ test('the panel fills the clock source before the data and the cards, so a host 
   const data = buildPanelData({ settings, now: NOW, timeZone: 'Europe/Zurich', hosts: [{ host: settings.hosts[0], result: { ok: true, value: fixture() } }] })
   const html = renderPanel(data, { template: TEMPLATE, timeZone: 'Europe/Zurich' })
   assert.equal(html.split('export function project(').length - 1, 1)
-  assert.ok(html.includes('<h2>/*__CLOCK__*/</h2>'))
+  assert.ok(html.includes('>/*__CLOCK__*/<span class="host-dot'))
 })
 
 test('clock data keeps per-model windows only with model limits on', () => {
@@ -152,7 +152,7 @@ test('the toggles row has 5h, Week, a spacer, Dial, Clock and List, and a card w
   const html = renderCard({ ...mac, open: true }, {})
   assert.ok(html.includes('<div class="views"><button class="view" data-view="session">5h</button><button class="view" data-view="weekly">Week</button>'
     + '<span class="spacer"></span><button class="face" data-face="dial">Dial</button><button class="face" data-face="clock">Clock</button><button class="face" data-face="list">List</button></div>'))
-  assert.ok(html.startsWith('<section class="host" data-host="mac" data-view="session" data-face="clock">'))
+  assert.ok(html.startsWith('<section role="tabpanel" class="host" data-host="mac" id="host-panel-0" aria-labelledby="host-tab-0" data-view="session" data-face="clock">'))
 })
 
 // The panel's face and window come from the settings, through buildPanelData and renderPanel into each card.
@@ -172,13 +172,13 @@ test('buildPanelData passes the settings face and window through as data.face an
 test('renderCard opens the card on the face and window it is given', () => {
   const [mac] = chosen('dial', 'weekly').hosts
   const html = renderCard({ ...mac, open: true, face: 'dial', view: 'weekly' }, {})
-  assert.ok(html.startsWith('<section class="host" data-host="mac" data-view="weekly" data-face="dial">'))
+  assert.ok(html.startsWith('<section role="tabpanel" class="host" data-host="mac" id="host-panel-0" aria-labelledby="host-tab-0" data-view="weekly" data-face="dial">'))
 })
 
 test('renderPanel gives every card the settings face and window', () => {
   const data = chosen('dial', 'weekly')
   const html = renderPanel(data, { template: TEMPLATE, timeZone: 'Europe/Zurich' })
-  assert.ok(html.includes('<section class="host" data-host="mac" data-view="weekly" data-face="dial">'))
+  assert.ok(html.includes('<section role="tabpanel" class="host" data-host="mac" id="host-panel-0" aria-labelledby="host-tab-0" data-view="weekly" data-face="dial">'))
 })
 
 test('each row index carries acct-N with N from the row index modulo 5', () => {

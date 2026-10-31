@@ -10,18 +10,18 @@ import { ROOT, fakeFs, fakeTimers, engine, label, start, statusRoute, statusExec
 
 const manifest = JSON.parse(await readFile(resolve(ROOT, 'orca-plugin.json'), 'utf8'))
 
-test('registers exactly the eleven manifest command ids and the two events', async () => {
+test('registers exactly the twelve manifest command ids and the two events', async () => {
   const { commands, handlers, plugin } = await start()
   const ids = manifest.contributes.commands.map((c) => c.id).sort()
   assert.deepEqual([...commands.keys()].sort(), ids)
-  assert.equal(Object.keys(plugin.commands).length, 11)
+  assert.equal(Object.keys(plugin.commands).length, 12)
   assert.deepEqual([...handlers.keys()].sort(), manifest.contributes.events.map((e) => e.on).sort())
 })
 
-test('a fresh install seeds all fifteen keys and records that it seeded', async () => {
+test('a fresh install seeds all seventeen keys and records that it seeded', async () => {
   const { calls } = await start({ stored: {} })
   assert.equal(hostCalls({ calls }, 'settings.set').length, Object.keys(DEFAULT_SETTINGS).length)
-  assert.equal(Object.keys(DEFAULT_SETTINGS).length, 15)
+  assert.equal(Object.keys(DEFAULT_SETTINGS).length, 17)
   assert.deepEqual(hostCalls({ calls }, 'storage.set').at(-1), { key: 'seeded', value: true })
 })
 
@@ -235,9 +235,9 @@ test('a budget expiry during deploy stops the sequence and says install may stil
   })
 })
 
-test('activation still registers all eleven commands when settings.get rejects', async () => {
+test('activation still registers all twelve commands when settings.get rejects', async () => {
   const fake = await start({ rejectSettingsGet: true })
-  assert.equal(fake.commands.size, 11)
+  assert.equal(fake.commands.size, 12)
   assert.equal(fake.handlers.size, 2)
   assert.ok(fake.logs.some((m) => m.includes('settings host unavailable')))
 })

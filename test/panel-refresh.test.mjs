@@ -51,7 +51,7 @@ function fakeFs(events = [], { dev = true } = {}) {
 }
 
 // Each harness answers status from a mutable report and records every status run with its timeout.
-function harness({ settings = fixtureSettings(), fs = fakeFs(), clock = { now: 1000 }, state = { report: report() }, events = [], bundled = async () => '0.4.7+fork.6' } = {}) {
+function harness({ settings = fixtureSettings(undefined), fs = fakeFs(), clock = { now: 1000 }, state = { report: report() }, events = [], bundled = async () => '0.4.7+fork.6' } = {}) {
   const calls = []
   const logs = []
   const bundledCalls = []
@@ -146,7 +146,7 @@ test('a changed remaining is written again when updated is present', async () =>
 })
 
 test('changing the panelFace setting rewrites the page, so the next card opens on the new face', async () => {
-  const settings = fixtureSettings()
+  const settings = fixtureSettings(undefined)
   const h = harness({ settings })
   await h.refresher.refresh()
   assert.ok(h.fs.files.get(PANEL).includes('data-face="clock"'))
@@ -211,7 +211,7 @@ test('without a deadline each status run keeps the 10 s timeout', async () => {
 
 test('results passed in are used and no status run is made', async () => {
   const h = harness()
-  const settings = fixtureSettings()
+  const settings = fixtureSettings(undefined)
   const results = settings.hosts.map((host) => ({ host, result: { ok: true, value: report() } }))
   assert.equal(await h.refresher.refresh({ results, deadline: h.clock.now + 1000 }), 'written')
   assert.equal(h.calls.length, 0)
@@ -346,8 +346,8 @@ test('a host cut off under a short budget keeps the time of its last good readin
   h.state.report = withThresholds(10)
   assert.equal(await h.refresher.refresh({ deadline: h.clock.now + 6000 }), 'written')
   const page = h.fs.files.get(PANEL)
-  const mac = page.slice(page.indexOf('<h2>mac</h2>'), page.indexOf('<h2>devbox</h2>'))
-  const cloudDev = page.slice(page.indexOf('<h2>devbox</h2>'))
+  const mac = page.slice(page.indexOf('<section role="tabpanel" class="host" data-host="mac"'), page.indexOf('<section role="tabpanel" class="host" data-host="devbox"'))
+  const cloudDev = page.slice(page.indexOf('<section role="tabpanel" class="host" data-host="devbox"'))
   assert.ok(mac.includes(`updated ${clockOf(new Date(later).toISOString())}`))
   assert.ok(cloudDev.includes(`updated ${clockOf(new Date(first).toISOString())}`))
 })
