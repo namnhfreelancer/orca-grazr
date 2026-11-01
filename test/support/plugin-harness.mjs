@@ -185,7 +185,7 @@ export async function start({ stored = null, storage = {}, context = null, route
 export const statusRoute = (extra = {}) => engine({ 'status --json': { stdout: JSON.stringify(report()) }, ...extra })
 export const statusExecs = (fake) => fake.execs.filter((a) => label(a) === 'status --json').length
 // The engine commands a test ran, without the panel refresh that the command's trigger adds after it.
-export const commandLabels = (fake) => fake.execs.map(label).filter((l) => l !== 'status --json')
+export const commandLabels = (fake) => fake.execs.map(label).filter((l) => l !== null && l !== 'status --json')
 
 export const toasts = (fake) => fake.calls.filter((c) => c.name === 'notifications.show').map((c) => c.params)
 export const hostCalls = (fake, name) => fake.calls.filter((c) => c.name === name).map((c) => c.params)

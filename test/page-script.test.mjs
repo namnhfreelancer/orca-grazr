@@ -7,8 +7,8 @@ import { loadPage } from './support/page-harness.mjs'
 const CARD = {
   name: 'mac',
   buttons: [
-    { kind: 'swap-to', command: 'swap', params: { host: 'mac', account: 'b' }, text: 'mac swap b', label: 'Switch' },
-    { kind: 'refresh', command: 'refresh', params: { host: 'mac' }, text: 'mac refresh', label: 'Refresh parked' },
+    { kind: 'swap-to', command: 'swap', params: { host: 'mac', account: 'b' }, text: 'mac swap b', label: 'Switch', palette: "Grazr: Swap to the next account (this workspace's server)" },
+    { kind: 'refresh', command: 'refresh', params: { host: 'mac' }, text: 'mac refresh', label: 'Refresh parked', palette: "Grazr: Refresh parked accounts (this workspace's server)" },
   ],
 }
 // The host runs a command and wraps its return value: a command's result is { value: { ok, message } }.
@@ -44,24 +44,25 @@ for (const transport of ['post', 'frame']) {
     assert.equal(page.cardOf('mac').getAttribute('data-busy'), 'false')
   })
 
-  t('a fallback code from the host falls back to the 0.5.x path: the page reads the context', async () => {
+
+  t('a fallback code from the host names the Cmd-J command on the card: a swap to one account also shows its command text', async () => {
     const page = await loadPage({ transport, generatedAt: FRESH(), cards: [CARD] })
     await page.click(SWITCH(page))
     await page.respond(0, { ok: false, errorCode: 'unknown_method', error: 'no such method' })
-    assert.equal(page.calls[1].action, 'workspace.readContext')
-    await page.respond(1, { ok: true, value: { terminals: [] } })
-    assert.match(msgOf(page, 'mac').textContent, /No terminal on this Mac/)
+    assert.equal(page.calls.length, 1)
+    assert.equal(msgOf(page, 'mac').textContent, "Run Cmd-J › Grazr: Swap to the next account (this workspace's server) (swaps to the next account; to pick b, run the command from a terminal: mac swap b)")
+    assert.equal(page.cardOf('mac').querySelector('pre.cmd').textContent, 'mac swap b')
     assert.equal(page.cardOf('mac').getAttribute('data-busy'), 'false')
   })
 
-  t('a fallback to a newest terminal types the command into it', async () => {
+  t('a fallback code on a button without an account names its Cmd-J title only, and shows no command', async () => {
     const page = await loadPage({ transport, generatedAt: FRESH(), cards: [CARD] })
-    await page.click(SWITCH(page))
+    await page.click(page.buttonOf('mac', 'refresh'))
     await page.respond(0, { ok: false, errorCode: 'capability_denied', error: 'denied' })
-    await page.respond(1, { ok: true, value: { terminals: [{ id: 'old' }, { id: 'new' }] } })
-    const send = page.calls[2]
-    assert.equal(send.action, 'terminal.sendText')
-    assert.deepEqual(send.params, { terminalId: 'new', text: 'mac swap b', enter: false })
+    assert.equal(page.calls.length, 1)
+    assert.equal(msgOf(page, 'mac').textContent, "Run Cmd-J › Grazr: Refresh parked accounts (this workspace's server)")
+    assert.equal(page.cardOf('mac').querySelector('pre.cmd'), null)
+    assert.equal(page.cardOf('mac').getAttribute('data-busy'), 'false')
   })
 
   t('a host error that is not a fallback code shows "failed" in the error style, and types nothing', async () => {
@@ -104,10 +105,19 @@ for (const transport of ['post', 'frame']) {
     assert.equal(placeholder.calls.length, 0)
   })
 
-  t('a stale page whose refresh fails says so in the footer', async () => {
+
+  t('a stale page whose refresh fails for another reason says so in the footer', async () => {
     const page = await loadPage({ transport, generatedAt: STALE(), cards: [CARD] })
-    await page.respond(0, { ok: false, errorCode: 'unknown_method', error: 'no such method' })
+    await page.respond(0, { ok: false, errorCode: 'action_failed', error: 'refresh broke' })
     assert.equal(page.stamp.textContent, FAILED_FOOTER)
+  })
+
+  t('a stale page that official Orca cannot refresh leaves the footer alone', async () => {
+    const page = await loadPage({ transport, generatedAt: STALE(), cards: [CARD] })
+    const before = page.stamp.textContent
+    await page.respond(0, { ok: false, errorCode: 'unknown_method', error: 'no such method' })
+    assert.equal(page.stamp.textContent, before)
+    assert.equal(page.stamp.textContent.includes('Run Cmd-J'), false)
   })
 
   t('a stale page whose refresh reports ok false says so in the footer', async () => {

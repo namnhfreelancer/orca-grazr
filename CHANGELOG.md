@@ -4,6 +4,33 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.8.0 - 2026-11-02
+
+Runs on official Orca 1.4.245. The plugin declares no `commands:execute` capability, since official Orca refuses a manifest that declares it. The panel's buttons name the palette command to run instead of running it.
+
+### Added
+
+- Two palette commands: `Grazr: Re-authenticate a blocked account (this workspace's server)`, which signs in the first blocked account in rotation order (or says there is none), and `Grazr: Add an account (this workspace's server)`. Both use the sign-in the panel's buttons use.
+- A palette action with no parameters acts on the server of the focused workspace, read from Orca's session (at most every 3 seconds), and on the target when the focus cannot be read.
+- While the drain loop runs, the worker follows the focused workspace every 3 seconds. A change of its host re-renders the panel with that host selected. Only a change re-renders, and the target setting is not written.
+
+### Changed
+
+- Palette titles name the server they act on: `Grazr: Swap to the next account (this workspace's server)`, `Grazr: Refresh parked accounts (this workspace's server)`, `Grazr: Turn rotation on/off (this workspace's server)`.
+- On an Orca without `commands.execute`, a panel button names its Cmd-J command on the card's message line (`Run Cmd-J › <title>`). A `Switch` or `Swap to` button on a named account also shows that account's command in a selectable line.
+- The panel's own focus poll stops silently on official Orca, and the worker's follow is what selects the focused host there. An official Orca cannot rewrite an installed plugin's panel, so the page there is the placeholder until the plugin is added as a development folder.
+- `Grazr: Target → next host` sets the page back to the target setting: the followed host stops overriding it until the focused workspace changes.
+
+### Removed
+
+- The fallback that typed a button's command into the newest terminal of the worktree. Enrol and status still type from the palette.
+- The `commands:execute` capability and its consent line.
+
+### Notes
+
+- Install, uninstall and Target → next host still act on the target, as their titles say.
+- A palette command whose focus names a workspace on no configured host acts on the target.
+
 ## 0.7.1 - 2026-10-31
 
 Summarises 0.7.0 and 0.7.1. Needs the same Orca as 0.6.9, and the `orca` CLI on this Mac. The bundled engine is `0.4.7+fork.12`.

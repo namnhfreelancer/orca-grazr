@@ -158,7 +158,7 @@ test('when the list after the create fails, the fresh profile is found again by 
   h.spawns[0].child.exit(0)
   await until(() => h.refreshes === 1)
   assert.equal(argAfter(deletesOf(h)[0], '--profile'), 'p1')
-  assert.equal(h.published[0].body, 'Orca\'s browser in the account-autoswitch workspace could not open the sign-in: busy\nNothing was enrolled.')
+  assert.equal(h.published[0].body, 'Orca\'s browser in the orca-grazr workspace could not open the sign-in: busy\nNothing was enrolled.')
   assert.deepEqual(h.profiles, [])
 })
 

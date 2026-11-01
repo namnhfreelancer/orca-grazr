@@ -96,7 +96,7 @@ const TEMP = '/var/folders/t/tmp.1'
 const withTemp = (route = engine({})) => (argv, opts) => {
   if (argv.at(-1) === 'mktemp -d') return { stdout: `${TEMP}\n` }
   // The local workspace the sign-in tab opens in: one local worktree.
-  if (argv[argv.indexOf('worktree') + 1] === 'list') return { code: 0, stdout: JSON.stringify({ ok: true, result: { worktrees: [{ id: 'fc5::/p/account-autoswitch', path: '/p/account-autoswitch', repo: { displayName: 'account-autoswitch' } }] } }) }
+  if (argv[argv.indexOf('worktree') + 1] === 'list') return { code: 0, stdout: JSON.stringify({ ok: true, result: { worktrees: [{ id: 'fc5::/p/orca-grazr', path: '/p/orca-grazr', repo: { displayName: 'orca-grazr' } }] } }) }
   return route(argv, opts)
 }
 // A sign-in reaches its login child once the ssh child is spawned; the spawn happens after the command returns.

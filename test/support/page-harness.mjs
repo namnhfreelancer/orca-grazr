@@ -99,7 +99,7 @@ function buildTab(doc, card, selected, slot) {
   return tab
 }
 
-// A card for the page: its buttons carry the data the template reads. Each button is { kind, command, params, text, label }.
+// A card for the page: its buttons carry the data the template reads. Each button is { kind, command, params, text, label, palette }.
 // As the renderer does, the card is the tabpanel of its tab, and it carries the hidden attribute unless it is the selected one.
 function buildCard(doc, card, selected) {
   const section = doc.createElement('section')
@@ -119,6 +119,7 @@ function buildCard(doc, card, selected) {
     button.setAttribute('data-text', b.text ?? '')
     button.setAttribute('data-command', b.command)
     button.setAttribute('data-params', JSON.stringify(b.params ?? {}))
+    button.setAttribute('data-palette', b.palette ?? '')
     button.textContent = b.label ?? b.kind
     section.appendChild(button)
   }

@@ -246,8 +246,8 @@ test('chips: Active, Blocked with its reason, Not in ACCOUNTS, and not enrolled'
 
 test('Switch and Re-authenticate… buttons carry their commands; the active and missing accounts have none', () => {
   const html = cardOf(fixture(), { commands: CMD })
-  assert.ok(acct(html, 'b').includes('<button class="act act-swap-to" data-host="mac" data-text="swap b" data-command="swap" data-params="{&quot;host&quot;:&quot;mac&quot;,&quot;account&quot;:&quot;b&quot;}">Switch</button>'))
-  assert.ok(acct(html, 'c').includes('<button class="act act-reauth" data-host="mac" data-text="enrol mac" data-command="enrol" data-params="{&quot;host&quot;:&quot;mac&quot;,&quot;account&quot;:&quot;c&quot;}">Re-authenticate…</button>'))
+  assert.ok(acct(html, 'b').includes('<button class="act act-swap-to" data-host="mac" data-text="swap b" data-command="swap" data-params="{&quot;host&quot;:&quot;mac&quot;,&quot;account&quot;:&quot;b&quot;}" data-palette="Grazr: Swap to the next account (this workspace&#39;s server)">Switch</button>'))
+  assert.ok(acct(html, 'c').includes('<button class="act act-reauth" data-host="mac" data-text="enrol mac" data-command="enrol" data-params="{&quot;host&quot;:&quot;mac&quot;,&quot;account&quot;:&quot;c&quot;}" data-palette="Grazr: Re-authenticate a blocked account (this workspace&#39;s server)">Re-authenticate…</button>'))
   assert.ok(acct(html, 'd').includes('act act-reauth'))
   assert.equal(acct(html, 'a').includes('<button class="act'), false, 'active: no button')
   assert.equal(acct(html, 'e').includes('<button class="act'), false, 'missing: no button')
@@ -339,7 +339,7 @@ test('an active account that is blocked offers Re-authenticate… in the data an
   report.accounts[0].blocked = 'token_expired'
   assert.equal(byName(report).a.action, 'reauth')
   const html = cardOf(report, { commands: CMD })
-  assert.ok(acct(html, 'a').includes('<button class="act act-reauth" data-host="mac" data-text="enrol mac" data-command="enrol" data-params="{&quot;host&quot;:&quot;mac&quot;,&quot;account&quot;:&quot;a&quot;}">Re-authenticate…</button>'))
+  assert.ok(acct(html, 'a').includes('<button class="act act-reauth" data-host="mac" data-text="enrol mac" data-command="enrol" data-params="{&quot;host&quot;:&quot;mac&quot;,&quot;account&quot;:&quot;a&quot;}" data-palette="Grazr: Re-authenticate a blocked account (this workspace&#39;s server)">Re-authenticate…</button>'))
   assert.equal(byName(fixture()).a.action, null, 'active, not blocked')
   assert.equal(acct(cardOf(fixture(), { commands: CMD }), 'a').includes('<button class="act'), false)
 })

@@ -62,15 +62,16 @@ test('template disables every button in a card while one of its calls is pending
   assert.ok(html.includes("card.getAttribute('data-busy') === 'true') return"))
   assert.ok(html.includes("card.querySelectorAll('button.act')"))
   assert.ok(html.includes('other.disabled = busy'))
-  // The guard is released on every path out of the call chains: the typed path (a failed context read, no terminal, a sent or failed type),
-  // and the command path (a message, a timeout, the typed fallback, a failure).
-  assert.equal(html.split('setBusy(card, false)').length - 1, 7)
+  // The guard is released on every path out of the command call: a message, a timeout, the Cmd-J guide, and a failure.
+  assert.equal(html.split('setBusy(card, false)').length - 1, 4)
 })
 
-test('template reads the context with an empty params object, as the worker expects', async () => {
+
+test('template never reads the terminal context or types into a terminal: official Orca names the Cmd-J command', async () => {
   const html = await readFile(templateUrl, 'utf8')
-  assert.ok(html.includes("call('workspace.readContext', {})"))
-  assert.equal(html.includes("call('workspace.readContext')"), false)
+  assert.equal(html.includes('workspace.readContext'), false)
+  assert.equal(html.includes('terminal.sendText'), false)
+  assert.equal(html.includes('typeIntoNewest'), false)
 })
 
 test('template has the list rules and the reading-age script', async () => {
@@ -89,38 +90,39 @@ test('template has no external references', async () => {
   }
 })
 
-test('template script handles the three readContext outcomes and the timeout', async () => {
+
+test('template names the Cmd-J command when the host lacks commands.execute, and types nothing', async () => {
   const html = await readFile(templateUrl, 'utf8')
-  assert.ok(html.includes('No terminal on this Mac to type into (Orca lets plugins reach local terminals only). Run this in a terminal on this Mac:'))
+  assert.ok(html.includes("'Run Cmd-J › ' + title"))
+  assert.ok(html.includes("button.getAttribute('data-palette')"))
+  assert.ok(html.includes("button.classList.contains('act-swap-to') && typeof params.account === 'string'"))
+  assert.ok(html.includes("' (swaps to the next account; to pick ' + params.account + ', run the command from a terminal: ' + text + ')'"))
+  assert.ok(html.includes('var guide = guideFor(button)'))
+  assert.ok(html.includes('setMsg(button, guide.message)'))
+  assert.equal(html.includes('No terminal on this Mac'), false)
   assert.equal(html.includes('Open a shell terminal in a worktree first'), false)
-  assert.ok(html.includes('context failed'))
-  assert.ok(html.includes('send failed'))
-  assert.ok(html.includes('enter: false'))
+  assert.ok(html.includes('send failed') === false)
   assert.ok(html.includes('5000'))
 })
 
-test('template shows the command when no local terminal exists', async () => {
+
+test('template shows the selectable command only for a swap to one account', async () => {
   const html = await readFile(templateUrl, 'utf8')
   assert.ok(html.includes("createElement('pre')"))
   assert.ok(html.includes("pre.className = 'cmd'"))
   assert.ok(html.includes('pre.tabIndex = 0'))
   assert.ok(html.includes('pre.textContent = text'))
   assert.ok(html.includes('selectAllChildren'))
-  assert.ok(html.includes('Then press l, log in to that account in the browser, and give it the same name.'))
-  assert.ok(html.includes('Then press l and log in to the new account in the browser (s saves the login this Mac uses now).'))
-  assert.ok(html.includes('act-reauth'))
-  assert.ok(html.includes('act-enrol'))
   assert.ok(html.includes('user-select: all'))
-  assert.ok(html.includes("note.className = 'cmd-hint'"))
-  assert.ok(html.includes('note.textContent = hint'))
   assert.ok(html.includes("addEventListener('click', selectCommand)"))
   assert.ok(html.includes("addEventListener('focus', selectCommand)"))
   assert.ok(html.includes('clearCommand(card)'))
   assert.ok(html.includes("insertAdjacentElement('afterend'"))
-  assert.ok(html.includes('note.remove()'))
   assert.ok(html.includes('el.remove()'))
   assert.ok(html.includes('if (!line) return'))
   assert.ok(html.includes('if (sel) sel.selectAllChildren(event.currentTarget)'))
+  assert.equal(html.includes('HINTS'), false)
+  assert.equal(html.includes('cmd-hint'), false)
 })
 
 test('placeholder page equals placeholderPanel(template)', async () => {

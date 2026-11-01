@@ -24,7 +24,7 @@ export const D2 = '/var/folders/t/tmp.2'
 export const NO_WORKSPACE = 'Sign-in needs a local project in Orca: add any folder on this Mac as a project (Orca › Add project), then click again'
 export const PID = 4242
 // The one local worktree of these tests, as `orca worktree list --json` lists it on this Mac.
-export const LOCAL_WORKTREE = { id: 'fc5fe73b-5b54-4ddc-bb50-4c3384c16071::/home/t/grazr', path: '/home/t/grazr', displayName: 'main', repo: { displayName: 'account-autoswitch' } }
+export const LOCAL_WORKTREE = { id: 'fc5fe73b-5b54-4ddc-bb50-4c3384c16071::/home/t/grazr', path: '/home/t/grazr', displayName: 'main', repo: { displayName: 'orca-grazr' } }
 export const WORKSPACE = `id:${LOCAL_WORKTREE.id}`
 
 // Orca prints pretty-printed JSON, so the fakes do too; singleLine() is the one-line form the engine uses.

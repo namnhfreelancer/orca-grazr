@@ -418,9 +418,9 @@ test('renderCard marks an outdated engine with an orange chip and a default mess
 test('renderCard has a rotation button that types the off command while rotation is on, and the on command while off', () => {
   const commands = { mac: { refresh: 'R', enrol: 'E', swap: 'S', swapTo: {}, rotationOn: 'ON1', rotationOff: 'OFF0' } }
   const on = renderCard(reachableHost(report(), '0.4.7+fork.6', true), commands)
-  assert.ok(on.includes('<button class="act act-rotation" data-host="mac" data-text="OFF0" data-command="rotation-toggle" data-params="{&quot;host&quot;:&quot;mac&quot;,&quot;enabled&quot;:false}">Turn rotation off</button>'))
+  assert.ok(on.includes('<button class="act act-rotation" data-host="mac" data-text="OFF0" data-command="rotation-toggle" data-params="{&quot;host&quot;:&quot;mac&quot;,&quot;enabled&quot;:false}" data-palette="Grazr: Turn rotation on/off (this workspace&#39;s server)">Turn rotation off</button>'))
   const off = renderCard(reachableHost(report(), '0.4.7+fork.6', false), commands)
-  assert.ok(off.includes('<button class="act act-rotation" data-host="mac" data-text="ON1" data-command="rotation-toggle" data-params="{&quot;host&quot;:&quot;mac&quot;,&quot;enabled&quot;:true}">Turn rotation on</button>'))
+  assert.ok(off.includes('<button class="act act-rotation" data-host="mac" data-text="ON1" data-command="rotation-toggle" data-params="{&quot;host&quot;:&quot;mac&quot;,&quot;enabled&quot;:true}" data-palette="Grazr: Turn rotation on/off (this workspace&#39;s server)">Turn rotation on</button>'))
   const unreachable = renderCard(panelOf(report()).hosts[1], commands)
   assert.ok(!unreachable.includes('act-rotation'))
 })

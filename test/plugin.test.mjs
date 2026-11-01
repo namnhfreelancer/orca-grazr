@@ -10,11 +10,11 @@ import { ROOT, fakeFs, fakeTimers, engine, label, start, statusRoute, statusExec
 
 const manifest = JSON.parse(await readFile(resolve(ROOT, 'orca-plugin.json'), 'utf8'))
 
-test('registers exactly the twelve manifest command ids and the two events', async () => {
+test('registers exactly the fourteen manifest command ids and the two events', async () => {
   const { commands, handlers, plugin } = await start()
   const ids = manifest.contributes.commands.map((c) => c.id).sort()
   assert.deepEqual([...commands.keys()].sort(), ids)
-  assert.equal(Object.keys(plugin.commands).length, 12)
+  assert.equal(Object.keys(plugin.commands).length, 14)
   assert.deepEqual([...handlers.keys()].sort(), manifest.contributes.events.map((e) => e.on).sort())
 })
 
@@ -235,9 +235,9 @@ test('a budget expiry during deploy stops the sequence and says install may stil
   })
 })
 
-test('activation still registers all twelve commands when settings.get rejects', async () => {
+test('activation still registers all fourteen commands when settings.get rejects', async () => {
   const fake = await start({ rejectSettingsGet: true })
-  assert.equal(fake.commands.size, 12)
+  assert.equal(fake.commands.size, 14)
   assert.equal(fake.handlers.size, 2)
   assert.ok(fake.logs.some((m) => m.includes('settings host unavailable')))
 })

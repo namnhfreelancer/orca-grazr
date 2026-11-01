@@ -4,8 +4,8 @@ import { createFocus, ENVIRONMENT_CACHE_MS } from '../lib/focus.mjs'
 import { fixtureSettings } from './support/fixture-hosts.mjs'
 import { start, toasts } from './support/plugin-harness.mjs'
 
-const CLOUD_DEV = '04af83dd-288c-4fe5-b1a6-db8e17417aac'
-const CLOUD_DEV2 = '13ae3ea4-7099-4281-b132-76e9a6d59fae'
+const DEVBOX = '00000000-0000-4000-8000-0000000000d1'
+const DEVBOX_2 = '00000000-0000-4000-8000-0000000000d2'
 const SETTINGS = fixtureSettings({ hosts: [
   { name: 'mac', ssh: null },
   { name: 'devbox', ssh: 'devbox' },
@@ -13,8 +13,8 @@ const SETTINGS = fixtureSettings({ hosts: [
 ] })
 const DB = '/home/t/Library/Application Support/orca/profiles/local-default/profile-state.db'
 const ENVIRONMENTS = JSON.stringify({ ok: true, result: { environments: [
-  { id: CLOUD_DEV, name: 'devbox' },
-  { id: CLOUD_DEV2, name: 'devbox-2' },
+  { id: DEVBOX, name: 'devbox' },
+  { id: DEVBOX_2, name: 'devbox-2' },
 ] } }, null, 2)
 
 // The session row's payload for a given execution host id, as sqlite3 prints it.
@@ -40,9 +40,9 @@ function focusWith(exec, { now = () => 1000, settings = SETTINGS } = {}) {
 }
 
 test('a workspace on a paired environment maps to the plugin host of that environment', async () => {
-  const fake = fakeExec({ sqlite: () => ({ stdout: payload(`runtime:${CLOUD_DEV}`) }) })
+  const fake = fakeExec({ sqlite: () => ({ stdout: payload(`runtime:${DEVBOX}`) }) })
   assert.deepEqual(await focusWith(fake.exec).current(), { ok: true, host: 'devbox' })
-  const second = fakeExec({ sqlite: () => ({ stdout: payload(`runtime:${CLOUD_DEV2}`) }) })
+  const second = fakeExec({ sqlite: () => ({ stdout: payload(`runtime:${DEVBOX_2}`) }) })
   assert.deepEqual(await focusWith(second.exec).current(), { ok: true, host: 'devbox-2' })
 })
 
@@ -70,7 +70,7 @@ test('an environment with no configured host maps to no host', async () => {
 
 test('a host that names its environment matches by orcaEnvironment', async () => {
   const settings = fixtureSettings({ hosts: [{ name: 'mac', ssh: null }, { name: 'lab', ssh: 'lab-box', orcaEnvironment: 'devbox-2' }] })
-  const fake = fakeExec({ sqlite: () => ({ stdout: payload(`runtime:${CLOUD_DEV2}`) }) })
+  const fake = fakeExec({ sqlite: () => ({ stdout: payload(`runtime:${DEVBOX_2}`) }) })
   assert.deepEqual(await focusWith(fake.exec, { settings }).current(), { ok: true, host: 'lab' })
 })
 
@@ -82,7 +82,7 @@ test('the sqlite read is read-only, on the expanded profile database, and runs t
 })
 
 test('the environment list is read with the orca CLI and cached for 60 seconds', async () => {
-  const fake = fakeExec({ sqlite: () => ({ stdout: payload(`runtime:${CLOUD_DEV}`) }) })
+  const fake = fakeExec({ sqlite: () => ({ stdout: payload(`runtime:${DEVBOX}`) }) })
   let clock = 1000
   const focus = focusWith(fake.exec, { now: () => clock })
   assert.deepEqual(await focus.current(), { ok: true, host: 'devbox' })
@@ -112,7 +112,7 @@ test('a sqlite binary that cannot run and a payload that is not JSON both fail q
 test('a failed environment list gives no host and is not cached, so the next read asks again', async () => {
   let fail = true
   const fake = fakeExec({
-    sqlite: () => ({ stdout: payload(`runtime:${CLOUD_DEV}`) }),
+    sqlite: () => ({ stdout: payload(`runtime:${DEVBOX}`) }),
     environments: () => (fail ? { code: 2, stderr: 'orca not running' } : { stdout: ENVIRONMENTS }),
   })
   const focus = focusWith(fake.exec)
@@ -123,7 +123,7 @@ test('a failed environment list gives no host and is not cached, so the next rea
 })
 
 test('the palette command toasts the focused host; the panel call gets the host quietly', async () => {
-  const fake = await start({ route: (argv) => (argv[0] === '/usr/bin/sqlite3' ? { stdout: payload(`runtime:${CLOUD_DEV}`) } : argv[0] === '/usr/local/bin/orca' ? { stdout: ENVIRONMENTS } : {}) })
+  const fake = await start({ route: (argv) => (argv[0] === '/usr/bin/sqlite3' ? { stdout: payload(`runtime:${DEVBOX}`) } : argv[0] === '/usr/local/bin/orca' ? { stdout: ENVIRONMENTS } : {}) })
   fake.calls.length = 0
   fake.execs.length = 0
   const quiet = await fake.plugin.commands['active-host']({})

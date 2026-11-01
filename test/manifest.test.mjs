@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { PALETTE } from '../lib/palette.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const manifest = JSON.parse(await readFile(resolve(root, 'orca-plugin.json'), 'utf8'))
@@ -12,10 +13,10 @@ test('manifest identifies the grazr plugin', () => {
   assert.equal(manifest.publisher, 'senadaruc')
 })
 
-test('manifest declares exactly twelve commands with unique ids', () => {
+test('manifest declares exactly fourteen commands with unique ids', () => {
   const ids = manifest.contributes.commands.map((c) => c.id)
-  assert.equal(ids.length, 12)
-  assert.equal(new Set(ids).size, 12)
+  assert.equal(ids.length, 14)
+  assert.equal(new Set(ids).size, 14)
 })
 
 test('only enrol and status-terminal are worktree-scoped', () => {
@@ -55,9 +56,13 @@ test('manifest declares the accounts panel and the panel-refresh command', () =>
   assert.ok(manifest.contributes.commands.some((c) => c.id === 'panel-refresh' && c.title === 'Grazr: Refresh panel'))
 })
 
-test('manifest and package declare version 0.7.1', async () => {
-  const pkg = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
-  assert.equal(manifest.version, '0.7.1')
-  assert.equal(pkg.version, '0.7.1')
+test('the palette titles the panel names are the manifest command titles', () => {
+  const titles = Object.fromEntries(manifest.contributes.commands.map((c) => [c.id, c.title]))
+  for (const [id, title] of Object.entries(PALETTE)) assert.equal(titles[id], title, id)
 })
 
+test('manifest and package declare version 0.8.0', async () => {
+  const pkg = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
+  assert.equal(manifest.version, '0.8.0')
+  assert.equal(pkg.version, '0.8.0')
+})

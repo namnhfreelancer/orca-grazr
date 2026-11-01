@@ -326,7 +326,6 @@
       .cmd { margin: 6px 0 0; padding: 6px; font-size: 11px; font-family: ui-monospace, Menlo, monospace;
              white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; -webkit-user-select: all;
              border: 1px solid var(--orca-border, var(--border, transparent)); border-radius: 4px; cursor: text; }
-      .cmd-hint { margin: 4px 0 0; font-size: 12px; color: var(--orca-muted-foreground, var(--muted-foreground, #999)); }
       .failure { margin: 8px 0 0; color: var(--orca-destructive, var(--destructive, #f87171)); overflow-wrap: anywhere; }
       .placeholder p { margin: 0 0 6px; color: var(--orca-muted-foreground, var(--muted-foreground, #999)); }
       footer {
@@ -352,7 +351,7 @@
       // Orca 1.4.245+ gives the frame window.orca.host.call, which resolves with the result and rejects with an
       // error that carries code and message; an older host takes the postMessage bridge below.
       // Calls wait 5 s, except a command, which may run for up to 30 s. A call the page gave up on resolves
-      // with timedOut set: the host may still be running it, so the page must not type it again.
+      // with timedOut set: the host may still be running it, so the page must not guide the user to run it again.
       function call(action, params, timeoutMs) {
         return new Promise(function (resolve) {
           var settled = false
@@ -423,7 +422,7 @@
         })
       }
 
-      // While one button's call is pending, every button in its card is disabled, so a second click cannot type twice.
+      // While one button's call is pending, every button in its card is disabled, so a second click cannot repeat it.
       function setBusy(card, busy) {
         card.setAttribute('data-busy', busy ? 'true' : 'false')
         card.querySelectorAll('button.act').forEach(function (other) {
@@ -431,32 +430,34 @@
         })
       }
 
-      // The host's errors that mean it does not offer commands.execute here: the page then falls back to typing.
+      // The host's errors that mean it does not offer commands.execute here: the page then names the Cmd-J command instead.
       var FALLBACK_CODES = ['invalid_request', 'unknown_method', 'panel_forbidden', 'capability_denied', 'consent_required']
       var COMMAND_TIMEOUT_MS = 30000
       // A page older than this was written by a worker that has not run since (Orca restarted): one panel refresh wakes it.
       var STALE_MS = 180000
-      var NO_TERMINAL = 'No terminal on this Mac to type into (Orca lets plugins reach local terminals only). Run this in a terminal on this Mac:'
-      var HINTS = {
-        'act-reauth': 'Then press l, log in to that account in the browser, and give it the same name.',
-        'act-enrol': 'Then press l and log in to the new account in the browser (s saves the login this Mac uses now).'
-      }
-
-      function hintFor(button) {
-        for (var kind in HINTS) {
-          if (button.classList.contains(kind)) return HINTS[kind]
-        }
-        return ''
-      }
-
       // A click or focus on the command selects all of it, so one copy gets the whole line.
       function selectCommand(event) {
         var sel = window.getSelection()
         if (sel) sel.selectAllChildren(event.currentTarget)
       }
 
-      // Shows the command under the card's message, reusing the card's own pre and hint when they exist.
-      function showCommand(card, text, hint) {
+      // Official Orca has no commands.execute, so a button cannot run here: it names its Cmd-J command on the card instead.
+      // A swap to one named account has no palette form; its command text is shown too, selectable, to copy into a terminal.
+      function guideFor(button) {
+        var title = button.getAttribute('data-palette') || ''
+        var params = paramsOf(button)
+        if (button.classList.contains('act-swap-to') && typeof params.account === 'string') {
+          var text = button.getAttribute('data-text') || ''
+          return {
+            message: 'Run Cmd-J › ' + title + ' (swaps to the next account; to pick ' + params.account + ', run the command from a terminal: ' + text + ')',
+            command: text
+          }
+        }
+        return { message: 'Run Cmd-J › ' + title, command: '' }
+      }
+
+      // Shows the command under the card's message, reusing the card's own pre when it exists.
+      function showCommand(card, text) {
         var line = card.querySelector('p.msg')
         if (!line) return
         var pre = card.querySelector('pre.cmd')
@@ -469,56 +470,10 @@
           line.insertAdjacentElement('afterend', pre)
         }
         pre.textContent = text
-        var note = card.querySelector('p.cmd-hint')
-        if (hint) {
-          if (!note) {
-            note = document.createElement('p')
-            note.className = 'cmd-hint'
-            pre.insertAdjacentElement('afterend', note)
-          }
-          note.textContent = hint
-        } else if (note) {
-          note.remove()
-        }
       }
 
       function clearCommand(card) {
-        card.querySelectorAll('pre.cmd, p.cmd-hint').forEach(function (el) { el.remove() })
-      }
-
-      // The 0.5.x path: types the button's command into the newest local terminal, or shows it to copy.
-      function typeIntoNewest(button) {
-        var card = cardOf(button)
-        if (!card || card.getAttribute('data-busy') === 'true') return
-        var text = button.getAttribute('data-text') || ''
-        if (!text) {
-          setMsg(button, 'Run Cmd-J › Grazr: Refresh panel in Orca to refresh this panel')
-          return
-        }
-        setBusy(card, true)
-        setMsg(button, 'Reading the focused worktree…')
-        call('workspace.readContext', {}).then(function (result) {
-          if (!result.ok) {
-            setMsg(button, 'context failed: ' + (result.error || result.errorCode))
-            setBusy(card, false)
-            return
-          }
-          var terminals = result.value && result.value.terminals
-          if (!terminals || terminals.length === 0) {
-            setMsg(button, NO_TERMINAL)
-            showCommand(card, text, hintFor(button))
-            setBusy(card, false)
-            return
-          }
-          var newest = terminals[terminals.length - 1]
-          call('terminal.sendText', { terminalId: newest.id, text: text, enter: false }).then(function (sent) {
-            if (sent.ok) clearCommand(card)
-            setMsg(button, sent.ok
-              ? 'Typed into the newest terminal — press Return there'
-              : 'send failed: ' + (sent.error || sent.errorCode))
-            setBusy(card, false)
-          })
-        })
+        card.querySelectorAll('pre.cmd').forEach(function (el) { el.remove() })
       }
 
       // Each card opens on the face and window its data-view and data-face carry (the settings' choice).
@@ -599,7 +554,7 @@
       }
 
       // Runs the button's command on the host. The host's message shows on the card's line; a host that does not
-      // offer commands.execute gets the typed fallback; a timeout is reported, never typed, since it may still run.
+      // offer commands.execute (official Orca) gets the Cmd-J guide instead; a timeout is reported, since it may still run.
       function runCommand(button) {
         var card = cardOf(button)
         if (!card || card.getAttribute('data-busy') === 'true') return
@@ -621,8 +576,11 @@
             return
           }
           if (FALLBACK_CODES.indexOf(result.errorCode) >= 0) {
+            var guide = guideFor(button)
+            clearCommand(card)
+            if (guide.command) showCommand(card, guide.command)
+            setMsg(button, guide.message)
             setBusy(card, false)
-            typeIntoNewest(button)
             return
           }
           setMsg(button, commandId + ' failed: ' + (result.error || result.errorCode), true)
@@ -746,6 +704,8 @@
       if (data.generatedAt && Date.now() - Date.parse(data.generatedAt) > STALE_MS) {
         call('commands.execute', { commandId: 'panel-refresh', params: {} }, COMMAND_TIMEOUT_MS).then(function (result) {
           // A failed or timed-out wake-up leaves the page stale; the footer says how to refresh it by hand.
+          // Official Orca cannot run the wake-up: the footer stays as it is, since an old generatedAt does not mean stale data.
+          if (FALLBACK_CODES.indexOf(result.errorCode) >= 0) return
           var outcome = (result.value && result.value.value) || {}
           if (!result.ok || outcome.ok === false) {
             document.getElementById('stamp').textContent = 'Panel refresh failed — Cmd-J Grazr: Refresh panel'

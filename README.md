@@ -33,26 +33,30 @@ Until then, in Orca open **Settings › Plugins**, turn the plugin system on, an
 https://github.com/senadaruc/orca-grazr
 ```
 
-An installed copy shows the committed placeholder panel. To see live data in the panel, run a development install from a checkout, as described under [Development](#development).
+An installed copy shows the committed placeholder panel, and the palette commands work. To see live data in the panel, add the plugin's checkout as a development folder, as described under [Development](#development). An installed copy cannot rewrite its own panel, because Orca verifies installed files.
 
 ## First steps
 
 1. **Add your hosts.** The shipped default manages only this Mac. To add a remote host, edit the plugin's `settings.json` (see [Settings](#settings) and [Remote hosts](#remote-hosts)). The file lives at `<userData>/plugins-data/senadaruc.grazr/settings.json`.
 2. **Install the engine on the target host.** Press Cmd-J and run `Grazr: Install engine on target`. Use `Grazr: Target → next host` to move the target to another host first.
-3. **Enrol accounts.** Open the Claude Accounts panel and press `Add account…`, which signs in through a local Orca workspace's built-in browser. Sign-in needs a remote host to log in on and a local Orca project on this Mac for the browser tab, and the default settings manage only this Mac, so add a remote host first (see [Remote hosts](#remote-hosts)). Then add the account names to the host's `config.env`, as described under [Enrolling accounts](#enrolling-accounts). Repeat for each host.
+3. **Enrol accounts.** Press Cmd-J and run `Grazr: Add an account (this workspace's server)`, which signs in through a local Orca workspace's built-in browser. Sign-in needs a remote host to log in on and a local Orca project on this Mac for the browser tab, and the default settings manage only this Mac, so add a remote host first (see [Remote hosts](#remote-hosts)). Then add the account names to the host's `config.env`, as described under [Enrolling accounts](#enrolling-accounts). Repeat for each host.
 4. **Open the panel.** Run `Grazr: Refresh panel`, then open the right sidebar and choose **Claude Accounts**.
 
 If another grazr already owns Claude's status line on the Mac, read [Status line owned by another grazr](#status-line-owned-by-another-grazr) before step 2.
 
-## How the panel buttons behave
+## Running actions on official Orca
 
-The panel runs each button through the Orca host. How the button completes depends on the Orca you run. The direct buttons, the sign-in, and the panel following the focused workspace all need an Orca with the `commands.execute` host method, proposed upstream in [stablyai/orca#36400](https://github.com/stablyai/orca/pull/36400). On current Orca, which does not offer that method yet, the buttons show the command and the tabs work, but the panel does not follow the focused workspace.
+Grazr runs on official Orca. Its actions are commands in the Cmd-J palette, and each one acts on the server of the workspace you are in:
 
-- **On an Orca that offers the `commands.execute` host method**, the buttons run directly. Refresh, Swap and Turn rotation on or off run without typing anything, and the result shows on the card's message line. `Add account…` and `Re-authenticate…` open Claude's login in a local Orca workspace's built-in browser, and the account is enrolled on the card's host once the login succeeds (see [Enrolling accounts](#enrolling-accounts)). The panel also follows the focused workspace's host (see [Claude Accounts panel](#claude-accounts-panel)).
-This release does not request `commands:execute`. The panel tries the method first and, when the host refuses it, falls back to typing as described next.
-- **On current Orca**, the buttons type the command into the most recently opened terminal of the focused worktree. They do not press Return: read the command and press Return yourself. If the newest terminal is an agent pane, open a new shell terminal first. The line under each card says where the text went, or asks you to open a shell terminal in a worktree first. On this kind of Orca, `Add account…` and `Re-authenticate…` do not start a sign-in: the card shows the enrol command under its message line instead, to run in a shell terminal.
+- `Grazr: Re-authenticate a blocked account (this workspace's server)` signs in the first blocked account in rotation order.
+- `Grazr: Add an account (this workspace's server)` signs in a new account.
+- `Grazr: Swap to the next account (this workspace's server)`, `Grazr: Refresh parked accounts (this workspace's server)` and `Grazr: Turn rotation on/off (this workspace's server)` act on the focused workspace's server. When Orca does not report the focused workspace, they act on the target instead.
 
-The palette commands always work, on either Orca. From the palette, `Grazr: Type enrol command into terminal` and `Grazr: Type status command into terminal` type into the newest terminal of the focused worktree.
+`Install engine`, `Uninstall` and `Target → next host` act on the target, as their titles say. Assign shortcuts to any of these commands in Orca's Shortcuts settings.
+
+The panel's buttons cannot run commands on official Orca yet. Each one names the palette command to run on its card instead. Orca PR [stablyai/orca#36400](https://github.com/stablyai/orca/pull/36400) would let the panel run them directly later.
+
+In a development install the panel follows your workspace (see [Claude Accounts panel](#claude-accounts-panel)). The palette commands work the same in either install.
 
 ## Settings
 
@@ -103,7 +107,7 @@ An Ultra account (the plan formerly called Max 20x) has no 5-hour limit under th
 
 ## Enrolling accounts
 
-`Add account…` and `Re-authenticate…` on a panel card sign in through Orca's built-in browser and enrol the account on that card's host. Nothing opens in your system browser.
+`Grazr: Add an account (this workspace's server)` and `Grazr: Re-authenticate a blocked account (this workspace's server)` sign in through Orca's built-in browser and enrol the account on the focused workspace's server. Nothing opens in your system browser.
 
 How a sign-in works:
 
@@ -149,13 +153,15 @@ A status bar of your own that calls grazr is never taken over, forced or not. Ed
 
 ## Commands
 
-These commands appear in the Orca command palette.
+These commands appear in the Orca command palette. A command whose title says "this workspace's server" acts on the server of the workspace you are in, and on the target when Orca does not report it.
 
 - `Grazr: Target → next host`: moves the target to the next host in the list.
 - `Grazr: Status (all hosts)`: shows each host's accounts and usage, one toast per host.
-- `Grazr: Swap now (target)`: swaps the target host to its next account now.
-- `Grazr: Refresh parked accounts (target)`: refreshes every account on the target host, including the active one. It asks Claude's usage endpoint and refreshes any lapsed token.
-- `Grazr: Toggle rotation (target)`: turns automatic rotation on or off on the target host.
+- `Grazr: Swap to the next account (this workspace's server)`: swaps the focused workspace's server to its next account now.
+- `Grazr: Re-authenticate a blocked account (this workspace's server)`: signs in the first blocked account in rotation order on the focused workspace's server. It says so when no account is blocked.
+- `Grazr: Add an account (this workspace's server)`: signs in a new account on the focused workspace's server.
+- `Grazr: Refresh parked accounts (this workspace's server)`: refreshes every account on the focused workspace's server, including the active one. It asks Claude's usage endpoint and refreshes any lapsed token.
+- `Grazr: Turn rotation on/off (this workspace's server)`: turns automatic rotation on or off on the focused workspace's server.
 - `Grazr: Install engine on target`: copies the engine to the target and installs grazr's status line and failure hook.
 - `Grazr: Uninstall from target`: removes grazr's status line and failure hook from the target.
 - `Grazr: Drain notices now`: delivers the queued notices immediately.
@@ -168,7 +174,7 @@ These commands appear in the Orca command palette.
 
 The panel shows every managed host. A tab strip across the top has one tab per host, each with a status dot: green when rotation is on and the host is reachable, grey when rotation is off, red when the host is unreachable or has no engine. One host's card shows at a time. Click a tab to read another host, or use Left and Right (Home and End) to move between tabs. The strip scrolls sideways when there are more hosts than fit.
 
-The tab of the host the focused workspace is on is selected first, and the panel follows the focused workspace while it is visible: a local workspace selects this Mac's tab, and a workspace on a paired environment selects that host's tab. The selected tab follows a change of workspace within about four seconds. The panel reads the focused workspace's host from Orca's profile database, read-only, and maps a paired environment to its host through `orca environment list --json` (cached for 60 seconds). Only a change of host moves the selection, so a tab you pick by hand stays selected until you switch workspace. If the Orca CLI or the database cannot be read, the panel keeps the cards as they are and tries again.
+The tab of the host the focused workspace is on is selected first, and the panel follows the focused workspace in a development install: a local workspace selects this Mac's tab, and a workspace on a paired environment selects that host's tab. The selected tab follows a change of workspace within about four seconds. The panel reads the focused workspace's host from Orca's profile database, read-only, and maps a paired environment to its host through `orca environment list --json` (cached for 60 seconds). Only a change of host moves the selection, so a tab you pick by hand stays selected until you switch workspace. If the Orca CLI or the database cannot be read, the panel keeps the cards as they are and tries again.
 
 Each card, under its tab, shows:
 
