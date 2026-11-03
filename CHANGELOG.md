@@ -4,6 +4,15 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.8.1 - 2026-11-03
+
+Runs on official Orca 1.4.246 and later with working panel buttons, and still declares no capability for them. On 1.4.245 it behaves as 0.8.0 did.
+
+### Changed
+
+- The panel's buttons, its focus poll and its stale-page wake-up ask the plugin's own worker through `plugin.request`, the panel-to-worker bridge official Orca ships since 1.4.246, when the frame's `host.has` offers it. The worker registers every command as a panel handler (`orca.panels.handle`) under the command's id, so a button runs exactly what the palette runs. No capability is needed and the consent screen does not change.
+- A host without `plugin.request` is tried through `commands.execute` as before, and a host with neither (official Orca 1.4.245) still names the Cmd-J command on the card.
+
 ## 0.8.0 - 2026-11-02
 
 Runs on official Orca 1.4.245. The plugin declares no `commands:execute` capability, since official Orca refuses a manifest that declares it. The panel's buttons name the palette command to run instead of running it.

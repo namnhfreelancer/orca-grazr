@@ -18,6 +18,24 @@ test('registers exactly the fourteen manifest command ids and the two events', a
   assert.deepEqual([...handlers.keys()].sort(), manifest.contributes.events.map((e) => e.on).sort())
 })
 
+test('every command is also a panel request handler on a host with orca.panels.handle, answering as the command does', async () => {
+  const { commands, panelHandlers } = await start()
+  assert.deepEqual([...panelHandlers.keys()].sort(), [...commands.keys()].sort())
+  const viaPanel = await panelHandlers.get('status')({})
+  const viaCommand = await commands.get('status')({})
+  assert.deepEqual(viaPanel, viaCommand)
+  assert.equal(typeof viaPanel.ok, 'boolean')
+  // A panel's plugin.request with no input reaches the handler as null, which the commands take as no params.
+  const bare = await panelHandlers.get('active-host')(null)
+  assert.equal(typeof bare.ok, 'boolean')
+})
+
+test('an older host without orca.panels still activates and registers every command', async () => {
+  const { commands, panelHandlers } = await start({ noPanels: true })
+  assert.equal(commands.size, 14)
+  assert.equal(panelHandlers.size, 0)
+})
+
 test('a fresh install seeds all seventeen keys and records that it seeded', async () => {
   const { calls } = await start({ stored: {} })
   assert.equal(hostCalls({ calls }, 'settings.set').length, Object.keys(DEFAULT_SETTINGS).length)

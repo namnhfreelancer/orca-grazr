@@ -16,11 +16,14 @@ export function fakeOrca({ stored = {}, context = null, flags = {}, storage = {}
   const state = { settings: structuredClone(stored), storage: structuredClone(storage) }
   const commands = new Map()
   const handlers = new Map()
+  const panelHandlers = new Map()
   const calls = []
   const logs = []
   const orca = {
     commands: { register: (id, fn) => commands.set(id, fn) },
     events: { on: (name, fn) => handlers.set(name, fn) },
+    // Orca 1.4.246+ offers panels.handle; flags.noPanels is an older host without it.
+    ...(flags.noPanels ? {} : { panels: { handle: (name, fn) => panelHandlers.set(name, fn) } }),
     host: {
       call: async (name, params) => {
         calls.push({ name, params })
@@ -42,7 +45,7 @@ export function fakeOrca({ stored = {}, context = null, flags = {}, storage = {}
     },
     log: (msg) => logs.push(msg),
   }
-  return { orca, commands, handlers, calls, logs, state, flags }
+  return { orca, commands, handlers, panelHandlers, calls, logs, state, flags }
 }
 
 // Timers are inert: a scheduled callback is recorded but never fires on its own.
@@ -158,11 +161,11 @@ export function fakeSpawn() {
   return { spawn, spawns }
 }
 
-export async function start({ stored = null, storage = {}, context = null, route = () => ({}), timers = fakeTimers(), now = () => 1000, rejectSettingsGet = false, rejectStorageSet = false, fs = fakeFs(), tmpdir = "/tmpdir", spawned = fakeSpawn() } = {}) {
+export async function start({ stored = null, storage = {}, context = null, route = () => ({}), timers = fakeTimers(), now = () => 1000, rejectSettingsGet = false, rejectStorageSet = false, noPanels = false, fs = fakeFs(), tmpdir = "/tmpdir", spawned = fakeSpawn() } = {}) {
   // No stored settings gets the three-host fixture; a settings file that names keys keeps them and gets the fixture hosts
   // unless it names its own; an explicit empty file ({}) stays empty, so the defaults apply.
   const withHosts = stored === null ? { hosts: FIXTURE_HOSTS } : Object.keys(stored).length ? { hosts: FIXTURE_HOSTS, ...stored } : stored
-  const fake = fakeOrca({ stored: withHosts, context, storage, flags: { rejectSettingsGet, rejectStorageSet } })
+  const fake = fakeOrca({ stored: withHosts, context, storage, flags: { rejectSettingsGet, rejectStorageSet, noPanels } })
   const ex = fakeExec(route)
   const plugin = await createGrazrPlugin({
     orca: fake.orca,

@@ -128,12 +128,13 @@ function buildCard(doc, card, selected) {
 
 // Loads the page with the given data: { generatedAt, target, cards: [{ name, buttons, open }] }, or no cards for the placeholder.
 // visible sets document.visibilityState; the default is hidden, so a test of another behaviour sends no focus poll.
-// transport 'post' gives the page the older postMessage bridge; 'frame' gives it window.orca.host.call (Orca 1.4.245+).
+// transport 'post' gives the page the older postMessage bridge; 'frame' gives it window.orca.host.call (Orca 1.4.245+),
+// and request true a frame whose host.has offers plugin.request (Orca 1.4.246+).
 // Results are given as the host reports them: { ok: true, value } or { ok: false, errorCode, error }. The frame
 // transport resolves with the value, or rejects with an error that carries code and message.
 // Returns: calls (what the page asked for), respond(index, result), fireTimers(ms), click(button), cardOf(name),
 // buttonOf(name, kind), stamp, and flush() to let the page's promise callbacks run.
-export async function loadPage({ generatedAt = null, cards = [], html = null, transport = 'post', visible = false } = {}) {
+export async function loadPage({ generatedAt = null, cards = [], html = null, transport = 'post', visible = false, request = false } = {}) {
   const source = html ?? await readFile(TEMPLATE_PATH, 'utf8')
   const script = source.slice(source.indexOf('<script>') + '<script>'.length, source.indexOf('</script>'))
   const doc = {
@@ -181,7 +182,8 @@ export async function loadPage({ generatedAt = null, cards = [], html = null, tr
           calls.push({ action: method, params: copy(params) })
           frameWaiters[calls.length - 1] = { resolve, reject }
         }),
-        has: () => true,
+        // request says whether the host offers plugin.request (Orca 1.4.246+); every other method is offered.
+        has: (method) => (method === 'plugin.request' ? request : true),
       }),
     }
   }

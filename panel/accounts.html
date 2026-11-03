@@ -430,7 +430,7 @@
         })
       }
 
-      // The host's errors that mean it does not offer commands.execute here: the page then names the Cmd-J command instead.
+      // The host's errors that mean it runs the worker's commands neither way here: the page then names the Cmd-J command instead.
       var FALLBACK_CODES = ['invalid_request', 'unknown_method', 'panel_forbidden', 'capability_denied', 'consent_required']
       var COMMAND_TIMEOUT_MS = 30000
       // A page older than this was written by a worker that has not run since (Orca restarted): one panel refresh wakes it.
@@ -441,7 +441,7 @@
         if (sel) sel.selectAllChildren(event.currentTarget)
       }
 
-      // Official Orca has no commands.execute, so a button cannot run here: it names its Cmd-J command on the card instead.
+      // A host with neither plugin.request nor commands.execute cannot run a button: it names its Cmd-J command on the card instead.
       // A swap to one named account has no palette form; its command text is shown too, selectable, to copy into a terminal.
       function guideFor(button) {
         var title = button.getAttribute('data-palette') || ''
@@ -553,17 +553,40 @@
         }
       }
 
-      // Runs the button's command on the host. The host's message shows on the card's line; a host that does not
-      // offer commands.execute (official Orca) gets the Cmd-J guide instead; a timeout is reported, since it may still run.
+      // Codes that mean the host has no plugin.request handler of that name: the older commands.execute route is tried then.
+      var REQUEST_MISSING = ['invalid_request', 'unknown_method']
+      // Whether this frame's host offers plugin.request (Orca 1.4.246+): host.has says; an older bridge has no has.
+      function hostHasRequest() {
+        var host = window.orca && window.orca.host
+        return !!(host && typeof host.has === 'function' && host.has('plugin.request'))
+      }
+
+      // Runs one of the worker's commands: through plugin.request where the host offers it (the plugin's own worker, no
+      // capability), else through commands.execute. Either way the result reads as commands.execute reports it:
+      // { ok: true, value: { value: <the command's return> } }, or { ok: false, errorCode, error, timedOut }.
+      function runWorker(commandId, params) {
+        var execute = function () {
+          return call('commands.execute', { commandId: commandId, params: params }, COMMAND_TIMEOUT_MS)
+        }
+        if (!hostHasRequest()) return execute()
+        return call('plugin.request', { name: commandId, input: params, timeoutMs: COMMAND_TIMEOUT_MS }, COMMAND_TIMEOUT_MS).then(function (result) {
+          if (result.ok) return { ok: true, value: { value: result.value && result.value.output } }
+          if (!result.timedOut && REQUEST_MISSING.indexOf(result.errorCode) >= 0) return execute()
+          return result
+        })
+      }
+
+      // Runs the button's command in the worker. The worker's message shows on the card's line; a host that runs it
+      // neither way (official Orca before 1.4.246) gets the Cmd-J guide instead; a timeout is reported, since it may still run.
       function runCommand(button) {
         var card = cardOf(button)
         if (!card || card.getAttribute('data-busy') === 'true') return
         var commandId = button.getAttribute('data-command')
         setBusy(card, true)
         setMsg(button, 'Working…')
-        call('commands.execute', { commandId: commandId, params: paramsOf(button) }, COMMAND_TIMEOUT_MS).then(function (result) {
+        runWorker(commandId, paramsOf(button)).then(function (result) {
           if (result.ok) {
-            // The host wraps a command's return value once more: { value: { ok, message } }.
+            // The result wraps the command's return value once more: { value: { ok, message } }.
             var value = (result.value && result.value.value) || {}
             var message = typeof value.message === 'string' && value.message !== '' ? value.message : commandId + (value.ok === false ? ' failed' : ' done')
             setMsg(button, message, value.ok === false)
@@ -669,7 +692,7 @@
       // The panel follows the focused workspace's host. While the page is visible, every FOCUS_POLL_MS (and on load and
       // when it becomes visible) the worker reports which host the focused workspace is on. A change of that host selects
       // its tab and scrolls the tab strip to it; the same host again does nothing, so a tab the user picked by hand stays
-      // selected until the workspace changes. A fallback code or a timed-out call means the host has no such command: polling stops.
+      // selected until the workspace changes. A fallback code or a timed-out call means the host cannot run the worker's commands: polling stops.
       var FOCUS_POLL_MS = 4000
       var focusHost = null
       var focusBusy = false
@@ -681,7 +704,7 @@
       function pollFocus() {
         if (focusStopped || focusBusy || document.visibilityState !== 'visible') return
         focusBusy = true
-        call('commands.execute', { commandId: 'active-host', params: {} }, COMMAND_TIMEOUT_MS).then(function (result) {
+        runWorker('active-host', {}).then(function (result) {
           focusBusy = false
           if (!result.ok) {
             if (result.timedOut || FALLBACK_CODES.indexOf(result.errorCode) >= 0) focusStopped = true
@@ -702,9 +725,9 @@
 
       // Once per load, and only for a stale page: the refresh rewrites the page, and a fresh page is never refreshed again.
       if (data.generatedAt && Date.now() - Date.parse(data.generatedAt) > STALE_MS) {
-        call('commands.execute', { commandId: 'panel-refresh', params: {} }, COMMAND_TIMEOUT_MS).then(function (result) {
+        runWorker('panel-refresh', {}).then(function (result) {
           // A failed or timed-out wake-up leaves the page stale; the footer says how to refresh it by hand.
-          // Official Orca cannot run the wake-up: the footer stays as it is, since an old generatedAt does not mean stale data.
+          // A host that runs it neither way leaves the footer as it is, since an old generatedAt does not mean stale data.
           if (FALLBACK_CODES.indexOf(result.errorCode) >= 0) return
           var outcome = (result.value && result.value.value) || {}
           if (!result.ok || outcome.ok === false) {

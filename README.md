@@ -16,7 +16,7 @@ The panel has three faces. **Dial** shows a ring with one segment per account, i
 
 ## Requirements
 
-- Orca 1.4.245 or later, with the plugin system enabled.
+- Orca 1.4.246 or later, with the plugin system enabled, for working panel buttons. The plugin installs on 1.4.245 too, where its actions are the palette commands and each button names the command to run.
 - Python 3 (`python3`) on this Mac and on each remote host.
 - Claude Code on each host that signs accounts in, at its `claudeBin` (default `~/.local/bin/claude`).
 - For sign-in: the `orca` CLI on this Mac (`orcaBin`, default `/usr/local/bin/orca`), a local Orca project on this Mac whose worktree hosts the sign-in tab (`signinWorkspace`), `claude` on the login host, and on that host plain `ssh`, `setsid` and GNU `timeout`. See [Enrolling accounts](#enrolling-accounts).
@@ -54,7 +54,7 @@ Grazr runs on official Orca. Its actions are commands in the Cmd-J palette, and 
 
 `Install engine`, `Uninstall` and `Target → next host` act on the target, as their titles say. Assign shortcuts to any of these commands in Orca's Shortcuts settings.
 
-The panel's buttons cannot run commands on official Orca yet. Each one names the palette command to run on its card instead. Orca PR [stablyai/orca#36400](https://github.com/stablyai/orca/pull/36400) would let the panel run them directly later.
+On Orca 1.4.246 and later the panel's buttons run these same commands, through the panel-to-worker bridge (`plugin.request`) that Orca ships for plugins; no extra capability is needed. On 1.4.245, which has no such bridge, each button names the palette command to run on its card instead.
 
 In a development install the panel follows your workspace (see [Claude Accounts panel](#claude-accounts-panel)). The palette commands work the same in either install.
 
