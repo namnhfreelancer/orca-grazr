@@ -4,6 +4,16 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.12.0 - 2026-11-05
+
+### Added
+
+- The panel updates its numbers in place. While it is visible it asks the worker for the latest render every 15 seconds (`plugin.request` to a `panel-live` handler) and updates each text and attribute that differs only in its digits: percentages, reset times, bars, ring arcs, tooltips; the clocks are redrawn from the new data. A face, view or tab the page selected is untouched, and nothing reloads. A change beyond digits still rewrites the page, which a development install reloads.
+
+### Changed
+
+- With the numbers live, a page whose only change is its numbers is rewritten at most every 30 minutes, not every 10.
+
 ## 0.11.1 - 2026-11-05
 
 ### Fixed

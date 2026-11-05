@@ -721,6 +721,55 @@
       setInterval(pollFocus, FOCUS_POLL_MS)
       document.addEventListener('visibilitychange', pollFocus)
 
+      // Live numbers. In a development install every rewrite of this page reloads the whole plugin, so the worker
+      // rewrites it only when more than numbers changed. Meanwhile, while the page is visible, it asks the worker for its
+      // latest render every LIVE_POLL_MS and updates in place each text and attribute that differs from it only in its
+      // digits: a percentage, a reset time, a bar width, a ring arc, a tooltip. A difference beyond digits (another
+      // account, a state, a chip) waits for the rewrite, and what the page itself set (a face, a view, the selected tab)
+      // is never touched. The clocks are redrawn from the new data. A host without plugin.request keeps the page as written.
+      var LIVE_POLL_MS = 15000
+      var liveBusy = false
+      function digitsOnly(a, b) {
+        return a !== b && a.replace(/\d+/g, '#') === b.replace(/\d+/g, '#')
+      }
+      function patchLive(oldNode, newNode) {
+        if (oldNode.nodeType !== newNode.nodeType) return
+        if (oldNode.nodeType === 3) {
+          if (digitsOnly(oldNode.nodeValue, newNode.nodeValue)) oldNode.nodeValue = newNode.nodeValue
+          return
+        }
+        if (oldNode.nodeType !== 1 || oldNode.tagName !== newNode.tagName) return
+        for (var i = 0; i < newNode.attributes.length; i++) {
+          var attr = newNode.attributes[i]
+          var current = oldNode.getAttribute(attr.name)
+          if (current !== null && digitsOnly(current, attr.value)) oldNode.setAttribute(attr.name, attr.value)
+        }
+        // The clocks and the reading ages are written by this script; only their attributes come from the render.
+        if (oldNode.classList.contains('clock') || oldNode.matches('p.reading')) return
+        if (oldNode.childNodes.length !== newNode.childNodes.length) return
+        for (var j = 0; j < newNode.childNodes.length; j++) patchLive(oldNode.childNodes[j], newNode.childNodes[j])
+      }
+      function pollLive() {
+        if (liveBusy || !hostHasRequest() || document.visibilityState !== 'visible') return
+        liveBusy = true
+        call('plugin.request', { name: 'panel-live', input: {}, timeoutMs: 5000 }, 6000).then(function (result) {
+          liveBusy = false
+          var live = result.ok && result.value && result.value.output
+          if (!live || typeof live.html !== 'string' || !live.data) return
+          try {
+            var fresh = new DOMParser().parseFromString(live.html, 'text/html').querySelector('main')
+            var page = document.querySelector('main')
+            if (!fresh || !page) return
+            patchLive(page, fresh)
+            data = live.data
+            ageLines()
+            if (typeof window.grazrDraw === 'function') window.grazrDraw()
+          } catch (e) {}
+        })
+      }
+      setInterval(pollLive, LIVE_POLL_MS)
+      document.addEventListener('visibilitychange', pollLive)
+
       document.getElementById('stamp').textContent = 'Cmd-J Grazr: Refresh panel'
 
       // Once per load, and only for a stale page: the refresh rewrites the page, and a fresh page is never refreshed again.
@@ -756,6 +805,8 @@
       }
       draw()
       setInterval(draw, 30000)
+      // The live update redraws the clocks from the data it brings.
+      window.grazrDraw = draw
     </script>
   </body>
 </html>

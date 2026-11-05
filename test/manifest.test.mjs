@@ -61,8 +61,8 @@ test('the palette titles the panel names are the manifest command titles', () =>
   for (const [id, title] of Object.entries(PALETTE)) assert.equal(titles[id], title, id)
 })
 
-test('manifest and package declare version 0.11.1', async () => {
+test('manifest and package declare version 0.12.0', async () => {
   const pkg = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
-  assert.equal(manifest.version, '0.11.1')
-  assert.equal(pkg.version, '0.11.1')
+  assert.equal(manifest.version, '0.12.0')
+  assert.equal(pkg.version, '0.12.0')
 })

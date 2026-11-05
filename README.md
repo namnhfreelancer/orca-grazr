@@ -247,6 +247,10 @@ The worker regenerates the panel when the plugin activates, after each drain tic
 
 A host that times out under a short command budget keeps its last reading. A host that times out at the full ten seconds is shown as `unreachable`.
 
+### Live numbers
+
+In a development install every rewrite of `panel/accounts.html` makes Orca reload the plugin, which flashes the panel and restarts the worker. The worker therefore rewrites the page at once only when more than numbers changed (active account, next, states, chips, the selected host), and otherwise at most every 30 minutes. Meanwhile an open, visible panel asks the worker for the latest render every 15 seconds (`plugin.request` to its `panel-live` handler, Orca 1.4.246 and later) and updates in place each text and attribute that differs from it only in digits, then redraws the clocks. What the page itself selected (face, view, tab) is never touched.
+
 ## Notifications
 
 On this Mac the engine posts its notices as macOS notifications directly. Each remote host whose `notifier` includes `queue` queues its notices, and the plugin drains those queues every `drainIntervalMs` and shows each one as an OS notification. A host without the engine installed is logged and retried quietly, with backoff capped at 10 minutes. An unreachable host is reported once, then retried with backoff; its later failures do not toast again until it recovers.

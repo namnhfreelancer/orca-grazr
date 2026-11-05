@@ -20,7 +20,8 @@ test('registers exactly the fourteen manifest command ids and the two events', a
 
 test('every command is also a panel request handler on a host with orca.panels.handle, answering as the command does', async () => {
   const { commands, panelHandlers } = await start()
-  assert.deepEqual([...panelHandlers.keys()].sort(), [...commands.keys()].sort())
+  // Plus panel-live, which only the page asks: its latest render, to update its numbers in place.
+  assert.deepEqual([...panelHandlers.keys()].sort(), [...commands.keys(), 'panel-live'].sort())
   const viaPanel = await panelHandlers.get('status')({})
   const viaCommand = await commands.get('status')({})
   assert.deepEqual(viaPanel, viaCommand)
@@ -421,4 +422,12 @@ test('drain-now with the command budget spent skips the panel refresh and logs i
   assert.equal(statusExecs(fake), before)
   assert.ok(fake.logs.includes('grazr: panel refresh skipped, no budget left'))
   assert.equal(toasts(fake).at(-1).title, 'grazr: drained')
+})
+
+test('panel-live answers the latest render with the data its page script reads', async () => {
+  const { panelHandlers } = await start()
+  const live = await panelHandlers.get('panel-live')(null)
+  assert.equal(typeof live.html, 'string')
+  assert.ok(live.html.includes('<main>'))
+  assert.deepEqual(Object.keys(live.data).sort(), ['generatedAt', 'hosts', 'target'])
 })
