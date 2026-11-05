@@ -62,21 +62,22 @@ const settings = (over = {}) => mergeSettings({ mode: 'orca-accounts', ...over }
 const MAC = { name: 'mac', ssh: null, orcaEnvironment: null, notifier: 'queue' }
 const VPS = { name: 'VPS', ssh: null, orcaEnvironment: 'VPS', notifier: 'queue' }
 
+// The rotation tests leave session moving and chat continuing to their own tests.
 function runnerWith(byEnvironment, storage = fakeStorage(), over = {}) {
   const orca = fakeOrca(byEnvironment)
-  const runner = createOrcaRunner({ settings: settings(over), exec: orca.exec, storage, now: () => NOW })
+  const runner = createOrcaRunner({ settings: settings({ ...over, orcaAccounts: { restartSessions: 'off', continueChats: 'off', ...over.orcaAccounts } }), exec: orca.exec, storage, now: () => NOW })
   return { runner, orca, storage }
 }
 
 test('the Orca accounts mode is the default, with its own thresholds', () => {
   const s = mergeSettings(undefined)
   assert.equal(s.mode, 'orca-accounts')
-  assert.deepEqual(s.orcaAccounts, { thresholds: { session: 15, weekly: 10 }, environments: 'all', localName: 'mac', restartSessions: 'restart' })
+  assert.deepEqual(s.orcaAccounts, { thresholds: { session: 15, weekly: 10 }, environments: 'all', localName: 'mac', restartSessions: 'restart', continueChats: 'continue', ssh: {} })
 })
 
 test('a bad orcaAccounts value falls back key by key', () => {
   const s = mergeSettings({ orcaAccounts: { thresholds: { session: 150, weekly: 20 }, environments: 7, localName: ' ', restartSessions: 'sometimes' } })
-  assert.deepEqual(s.orcaAccounts, { thresholds: { session: 15, weekly: 20 }, environments: 'all', localName: 'mac', restartSessions: 'restart' })
+  assert.deepEqual(s.orcaAccounts, { thresholds: { session: 15, weekly: 20 }, environments: 'all', localName: 'mac', restartSessions: 'restart', continueChats: 'continue', ssh: {} })
   assert.equal(mergeSettings({ orcaAccounts: { restartSessions: 'off' } }).orcaAccounts.restartSessions, 'off')
   assert.equal(mergeSettings({ mode: 'other' }).mode, 'orca-accounts')
 })

@@ -4,6 +4,13 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.11.0 - 2026-11-05
+
+### Added
+
+- A session that hits a usage limit swaps the account at once and carries on without a press: a native chat is sent Orca's own continue message, so its turn resumes on the new account instead of at the reset, and a terminal pane is relaunched with `--resume` and the same message. Chats are found and continued on their own host through its local Orca socket (`lib/orca-chat-helper.cjs`), on a paired environment over the ssh alias in `orcaAccounts.ssh`. Settings: `orcaAccounts.continueChats` (default `continue`), `orcaAccounts.ssh`.
+- An agent status change brings the next tick forward to about 5 seconds later in the Orca accounts mode.
+
 ## 0.10.0 - 2026-11-05
 
 ### Added

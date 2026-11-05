@@ -108,3 +108,13 @@ test('a pane that does not exit is reported, keeps its pending line, and a later
   assert.equal(host.sends.at(-1).text, `claude --dangerously-skip-permissions --resume ${SESSION}`)
   assert.deepEqual(store.data.orcaPendingRelaunch, {})
 })
+
+test('a pane a usage limit stopped is resumed with the continue prompt, on this Mac without waiting out the grace', async () => {
+  const host = fakeHost([pane()])
+  const c = clock()
+  const mover = createSessionMover({ rpc: host.rpc, storage: storage(), now: c.now, sleep: c.sleep })
+  const panes = claudePanes({ snapshots: [{ tabs: [pane()] }] }).map((p) => ({ ...p, limited: true }))
+  const lines = await mover.move(MAC, VALUE, { activeId: NEW, lastRotationAt: c.now() - 1000, panes })
+  assert.equal(lines.length, 1)
+  assert.equal(host.sends.at(-1).text, `claude --dangerously-skip-permissions --resume ${SESSION} 'Continue where you left off.'`)
+})
