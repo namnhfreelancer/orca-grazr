@@ -36,10 +36,10 @@ test('an older host without orca.panels still activates and registers every comm
   assert.equal(panelHandlers.size, 0)
 })
 
-test('a fresh install seeds all seventeen keys and records that it seeded', async () => {
+test('a fresh install seeds all twenty keys and records that it seeded', async () => {
   const { calls } = await start({ stored: {} })
   assert.equal(hostCalls({ calls }, 'settings.set').length, Object.keys(DEFAULT_SETTINGS).length)
-  assert.equal(Object.keys(DEFAULT_SETTINGS).length, 17)
+  assert.equal(Object.keys(DEFAULT_SETTINGS).length, 20)
   assert.deepEqual(hostCalls({ calls }, 'storage.set').at(-1), { key: 'seeded', value: true })
 })
 
@@ -52,8 +52,8 @@ test('an empty settings file after seeding is never overwritten and the user is 
 test('seeds only the settings keys that are missing on activation', async () => {
   const { state, calls } = await start({ stored: { target: 'devbox' } })
   const sets = hostCalls({ calls }, 'settings.set').map((p) => p.key).sort()
-  // The stored file names a target and so gets the three-host fixture; every other key but hosts is seeded.
-  const missing = Object.keys(DEFAULT_SETTINGS).filter((k) => k !== 'target' && k !== 'hosts').sort()
+  // The stored file names a target and so gets the three-host fixture and the engine mode; every other key is seeded.
+  const missing = Object.keys(DEFAULT_SETTINGS).filter((k) => k !== 'target' && k !== 'hosts' && k !== 'mode').sort()
   assert.deepEqual(sets, missing)
   assert.equal(state.settings.target, 'devbox')
   assert.deepEqual(state.settings.hosts, FIXTURE_HOSTS)

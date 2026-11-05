@@ -1,8 +1,11 @@
 # Grazr for Orca
 
-Grazr rotates the **System default** Claude Code account on each of your hosts before a usage window runs out. It uses the grazr engine, a small Python program that runs on each host, so you keep working in the same conversation when a swap happens. Orca is the front end: a command palette, OS notifications, and a **Claude Accounts** panel in the right sidebar that shows every host in one place.
+Grazr rotates your Claude Code account before a usage window runs out. It has two modes, chosen by the `mode` setting:
 
-Hosts are this Mac plus any remote machines you reach over `ssh`. Orca's own managed accounts are left alone.
+- **Orca accounts** (`"mode": "orca-accounts"`, the default): Grazr rotates the Claude account Orca launches with, the one picked in **Settings › AI Provider Accounts**, on this Mac and on every paired Orca environment. Orca already reads each account's usage and switches accounts itself, so nothing is installed on any host: no engine, no `ssh`, no change to `~/.claude`. See [Orca accounts mode](#orca-accounts-mode).
+- **Engine** (`"mode": "engine"`): Grazr rotates the **System default** Claude Code login (`~/.claude`) on each host with the grazr engine, a small Python program that runs on each host, so you keep working in the same conversation when a swap happens. Hosts are this Mac plus any remote machines you reach over `ssh`.
+
+In both modes Orca is the front end: a command palette, OS notifications, and a **Claude Accounts** panel in the right sidebar that shows every host in one place.
 
 ## Screenshots
 
@@ -15,6 +18,8 @@ Hosts are this Mac plus any remote machines you reach over `ssh`. Orca's own man
 The panel has three faces. **Dial** shows a ring with one segment per account, in rotation order. **Clock** shows a 24-hour face (5h view) or a 7-day face (Week view), with the swaps and refills projected ahead. **List** shows one card per account with a bar for each usage window.
 
 ## Requirements
+
+The Orca accounts mode needs only Orca 1.4.246 or later at `orcaApp`, with the Claude accounts added in Settings › AI Provider Accounts on each host. The rest of this list is for the engine mode.
 
 - Orca 1.4.246 or later, with the plugin system enabled, for working panel buttons. The plugin installs on 1.4.245 too, where its actions are the palette commands and each button names the command to run.
 - Python 3 (`python3`) on this Mac and on each remote host.
@@ -58,10 +63,28 @@ On Orca 1.4.246 and later the panel's buttons run these same commands, through t
 
 In a development install the panel follows your workspace (see [Claude Accounts panel](#claude-accounts-panel)). The palette commands work the same in either install.
 
+## Orca accounts mode
+
+This is the default mode. Grazr manages this Mac (its card is named after `orcaAccounts.localName`, default `mac`) and every Orca environment listed by `orca environment list`, each under its environment name. A paired environment that Orca cannot reach shows as `unreachable` and is retried on the next tick.
+
+On every drain tick (`drainIntervalMs`), for each host with rotation on, Grazr reads the accounts through Orca's runtime (`accounts.list`, with a usage refresh) and, when the active account has less than `orcaAccounts.thresholds.session` percent left in its 5-hour window or less than `orcaAccounts.thresholds.weekly` percent left in its weekly window, selects the next account through `accounts.selectClaude`, exactly as picking it in Settings does. Orca then treats the Claude sessions already running as it does for a switch in Settings, following your choice there to keep them, restart them on the new account, or ask. The next account is the first one in Orca's account order, other than the active one, that does not need a sign-in and has no live window below its threshold. An account whose usage Orca has not read yet counts as available. With nothing to swap to, one notification says so, and the next one comes only after the active account has recovered.
+
+The calls go through Orca's own CLI client, run in Electron's Node mode from the Orca app at `orcaApp` (default `/Applications/Orca.app`), with `ORCA_ENVIRONMENT` naming the environment for a paired host. See `lib/orca-accounts.mjs` and `lib/orca-rpc.cjs`.
+
+Settings of this mode, in `orcaAccounts`:
+
+- `thresholds`: `{ "session": 15, "weekly": 10 }`, the percent left below which the active account is swapped away from.
+- `environments`: `"all"` (the default), `"none"` for this Mac alone, or a list of environment names to rotate on.
+- `localName`: the name of this Mac's card and toasts. The default is `mac`.
+
+Rotation is turned on or off per host with `Grazr: Turn rotation on/off` or the panel's button, and is stored in the plugin's own storage. `Swap to the next account` and the panel's `Swap to` buttons select an account right away. Install, uninstall, enrol and the sign-in commands have nothing to do in this mode: add or re-authenticate accounts in **Settings › AI Provider Accounts**. The `hosts`, `engineDir`, `stateDir`, `configDir`, `ssh*` and `rsyncBin` settings apply to the engine mode only.
+
 ## Settings
 
 Orca keeps the settings in `<userData>/plugins-data/senadaruc.grazr/settings.json`. On first activation the plugin writes only the default keys that are missing; values you set are kept. Edit the file to change them. Changes to `drainIntervalMs` and the hosts take effect on the next drain tick, without a restart.
 
+- `mode`: `orca-accounts` (the default) or `engine`. See [Orca accounts mode](#orca-accounts-mode).
+- `orcaApp`, `orcaAccounts`: the settings of the Orca accounts mode, described there.
 - `hosts`: the hosts to manage. See [Remote hosts](#remote-hosts) for the fields.
 - `target`: the host that target-scoped commands act on. It must match a host `name`. The default is `mac`.
 - `engineDir`: where the engine is installed on each host. The default is `~/.local/share/orca-grazr/engine`.

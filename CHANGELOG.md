@@ -4,6 +4,20 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.9.0 - 2026-11-05
+
+Rotates Orca's own Claude accounts (Settings › AI Provider Accounts) instead of the System default login, on this Mac and every paired Orca environment. The engine mode stays available.
+
+### Added
+
+- The `mode` setting: `orca-accounts`, the new default, or `engine`, the System default rotation of earlier versions. In the Orca accounts mode the plugin reads each account's usage with Orca's runtime `accounts.list` and selects the next account with `accounts.selectClaude`, through Orca's own CLI client (`lib/orca-rpc.cjs`). Nothing is installed on any host.
+- The hosts of the Orca accounts mode are this Mac and the paired Orca environments (`orcaAccounts.environments`: `all`, `none` or a list of names), read from `orca environment list` once a minute.
+- `orcaApp` and `orcaAccounts` (`thresholds`, `environments`, `localName`) settings.
+
+### Changed
+
+- The focused workspace's host matches a host by its Orca environment, so a workspace on a paired environment selects that environment's card in either mode.
+
 ## 0.8.1 - 2026-11-03
 
 Runs on official Orca 1.4.246 and later with working panel buttons, and still declares no capability for them. On 1.4.245 it behaves as 0.8.0 did.
