@@ -229,3 +229,9 @@ test('a chat with open background tasks has them stopped and named in a plain co
   assert.match(send.params.body.blocks[0].text, /"Issue 129: review"\. Start again any that you still need\./)
   assert.equal(send.params.usageLimitContinuationOfTurnItemId, undefined)
 })
+
+test('a chat on the System default login is continued on the selected account; a cut older than 12 hours is not', async () => {
+  const host = fakeHost({ active: B.id, cuts: [{ ...cut(null), sessionId: 'claude_sys' }, { ...cut(A.id), sessionId: 'claude_old', endedAt: NOW - 13 * HOUR }] })
+  await runner(host).runLines(MAC, ['notices-drain'])
+  assert.deepEqual(host.state.sent.map(([id]) => id), ['claude_sys'])
+})

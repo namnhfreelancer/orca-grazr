@@ -4,6 +4,14 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.12.5 - 2026-11-05
+
+### Fixed
+
+- Chats a limit stopped are found within a tick again. The scan read each chat's history one after another and timed out on a server with dozens of chats, so a stopped chat waited minutes; it now reads eight at a time, only the last 15 rows of each, with its own 30-second budget (about 1.5 s for 50 chats).
+- A chat's record is not updated by every turn, so the scan reads every chat touched in the last 24 hours and continues the cuts that ended in the last 12.
+- A chat on the System default login (no Orca account recorded) is continued too: it restarts on the selected Orca account.
+
 ## 0.12.4 - 2026-11-05
 
 ### Fixed
