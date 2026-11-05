@@ -251,6 +251,10 @@ A host that times out under a short command budget keeps its last reading. A hos
 
 In a development install every write of `panel/accounts.html` makes Orca reload the plugin, which flashes the panel and restarts the worker in the middle of whatever it was doing (a swap, a chat being continued). With `panelLive: true` (the default) the worker therefore never writes the page. An open, visible panel asks the worker for its latest render at load and every 15 seconds (`plugin.request` to its `panel-live` handler, Orca 1.4.246 and later). When only numbers changed, it updates in place each text and attribute that differs in digits and redraws the clocks; when the structure changed (another account, a state, a chip; the worker sends a digest of the render without its digits), it replaces its `<main>` in place and keeps the tab, face and view you chose. Nothing reloads either way. Set `panelLive: false` on an Orca without `plugin.request`, where the page file is rewritten as before.
 
+### When Orca withdraws the approval
+
+Orca binds a plugin's approval to its manifest. After an Orca restart, a plugin whose manifest changed since it was approved (a new version, for one) keeps running while Orca refuses every host call it makes, so nothing rotates. Grazr notices the first refused call and starts `lib/consent-heal.cjs` in a detached process: it disables, enables and approves the plugin again, as you would in Settings › Plugins, but only when Orca asks for exactly the execution level and capabilities `orca-plugin.json` declares. A request for anything more is left to you, and a macOS notification says so. It runs at most once every 15 minutes.
+
 ## Notifications
 
 On this Mac the engine posts its notices as macOS notifications directly. Each remote host whose `notifier` includes `queue` queues its notices, and the plugin drains those queues every `drainIntervalMs` and shows each one as an OS notification. A host without the engine installed is logged and retried quietly, with backoff capped at 10 minutes. An unreachable host is reported once, then retried with backoff; its later failures do not toast again until it recovers.

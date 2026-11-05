@@ -4,6 +4,12 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.13.1 - 2026-11-05
+
+### Fixed
+
+- Grazr recovers by itself when Orca withdraws its approval. Orca binds an approval to the manifest, and after a restart a plugin whose manifest changed since it was approved keeps running with every host call refused ("plugin is not enabled with current consent"), so the rotation stopped without a word. The first refused call now starts a detached `lib/consent-heal.cjs` that disables, enables and approves the plugin again, but only when Orca asks for exactly the execution level and capabilities the manifest declares; otherwise it posts a macOS notification asking you to approve it in Settings › Plugins. At most one renewal every 15 minutes.
+
 ## 0.13.0 - 2026-11-05
 
 ### Changed

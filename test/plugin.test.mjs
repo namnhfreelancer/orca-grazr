@@ -431,3 +431,27 @@ test('panel-live answers the latest render with the data its page script reads',
   assert.ok(live.html.includes('<main>'))
   assert.deepEqual(Object.keys(live.data).sort(), ['generatedAt', 'hosts', 'structureKey', 'target'])
 })
+
+test('a host call refused for want of current consent starts one detached approval renewal', async () => {
+  const { createConsentGuard, isConsentRefusal, HEAL_GAP_MS } = await import('../lib/consent-guard.mjs')
+  const spawned = []
+  let clock = 1000
+  const guard = createConsentGuard({
+    root: '/plugin',
+    now: () => clock,
+    readManifest: () => ({ execution: 'trusted-worker', capabilities: [{ kind: 'storage:own' }, { kind: 'settings:own' }] }),
+    spawn: (file, args, opts) => { spawned.push({ file, args, opts }); return { unref() {}, on() {} } },
+  })
+  assert.equal(isConsentRefusal(new Error('plugin is not enabled with current consent')), true)
+  assert.equal(isConsentRefusal(Object.assign(new Error('x'), { code: 'consent_required' })), true)
+  assert.equal(isConsentRefusal(new Error('settings host unavailable')), false)
+  assert.equal(guard.trip(), true)
+  assert.equal(guard.trip(), false)
+  assert.equal(spawned.length, 1)
+  assert.match(spawned[0].args[0], /consent-heal\.cjs$/)
+  assert.deepEqual(spawned[0].args.slice(2), ['senadaruc.grazr', 'trusted-worker', 'storage:own,settings:own'])
+  assert.equal(spawned[0].opts.detached, true)
+  assert.equal(spawned[0].opts.env.ELECTRON_RUN_AS_NODE, '1')
+  clock += HEAL_GAP_MS
+  assert.equal(guard.trip(), true)
+})
