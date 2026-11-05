@@ -4,6 +4,12 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.13.0 - 2026-11-05
+
+### Changed
+
+- The panel is live: the worker no longer writes `panel/accounts.html` (`panelLive`, default `true`). Every write made a development install reload the plugin, and a host flipping between reachable and timed out rewrote the page, restarted the worker and lost its memory of the last good reading, so the panel flashed and the worker was killed before it could continue a chat. The open page takes every render from the worker instead: numbers in place, and a changed structure by replacing `<main>` in place, keeping the selected tab, face and view.
+
 ## 0.12.5 - 2026-11-05
 
 ### Fixed

@@ -90,7 +90,8 @@ test('a frame whose host does not offer plugin.request uses commands.execute at 
 test('the focus poll asks the worker for the focused host through plugin.request and follows its answer', async () => {
   const cards = [{ name: 'mac', open: true, buttons: [] }, { name: 'devbox', buttons: [] }]
   const page = await load({ cards, visible: true })
-  assert.equal(requests(page).length, 1)
+  // A visible page also asks for the latest render (panel-live) at load; the focus poll is the first request.
+  assert.deepEqual(requests(page).map((c) => c.params.name), ['active-host', 'panel-live'])
   assert.deepEqual(requests(page)[0].params, { name: 'active-host', input: {}, timeoutMs: 30000 })
   await page.respond(0, answered({ ok: true, host: 'devbox' }))
   assert.equal(page.tabOf('devbox').getAttribute('aria-selected'), 'true')

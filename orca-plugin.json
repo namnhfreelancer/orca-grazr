@@ -5,7 +5,7 @@
   "id": "grazr",
   "publisher": "senadaruc",
   "name": "Grazr",
-  "version": "0.12.5",
+  "version": "0.13.0",
   "description": "Auto-rotates the System default Claude Code account across your hosts when a usage window is nearly spent (grazr engine), with OS toasts.",
   "license": "MIT",
   "repository": "https://github.com/senadaruc/orca-grazr",

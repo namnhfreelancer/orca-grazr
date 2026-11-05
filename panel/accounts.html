@@ -532,18 +532,22 @@
         try { if (e.target.closest && e.target.closest(TIP_SEG)) tip.hidden = true } catch (err) {}
       })
 
-      document.querySelectorAll('button.view').forEach(function (toggle) {
-        toggle.addEventListener('click', function () {
-          var view = toggle.getAttribute('data-view')
-          document.querySelectorAll('section.host').forEach(function (card) { setView(card, view) })
+      // The controls are bound per element, at load and again under a <main> the live update replaced (bindControls).
+      function bindToggles(root) {
+        root.querySelectorAll('button.view').forEach(function (toggle) {
+          toggle.addEventListener('click', function () {
+            var view = toggle.getAttribute('data-view')
+            document.querySelectorAll('section.host').forEach(function (card) { setView(card, view) })
+          })
         })
-      })
-      document.querySelectorAll('button.face').forEach(function (toggle) {
-        toggle.addEventListener('click', function () {
-          var face = toggle.getAttribute('data-face')
-          document.querySelectorAll('section.host').forEach(function (card) { setFace(card, face) })
+        root.querySelectorAll('button.face').forEach(function (toggle) {
+          toggle.addEventListener('click', function () {
+            var face = toggle.getAttribute('data-face')
+            document.querySelectorAll('section.host').forEach(function (card) { setFace(card, face) })
+          })
         })
-      })
+      }
+      bindToggles(document)
       // The params are the JSON the button carries; a value that does not parse sends none.
       function paramsOf(button) {
         try {
@@ -611,11 +615,14 @@
         })
       }
 
-      document.querySelectorAll('button.act[data-command]').forEach(function (button) {
-        button.addEventListener('click', function () {
-          runCommand(button)
+      function bindCommands(root) {
+        root.querySelectorAll('button.act[data-command]').forEach(function (button) {
+          button.addEventListener('click', function () {
+            runCommand(button)
+          })
         })
-      })
+      }
+      bindCommands(document)
 
       // The list face's reading age: "Reading from …" under each account, at load and every 30 s.
       // Under a minute it reads "just now"; otherwise the largest whole day, hour or minute that fits.
@@ -678,16 +685,19 @@
         if (key === 'End') return tabs[n - 1]
         return null
       }
-      tabsOf().forEach(function (tab) {
-        tab.addEventListener('click', function () { selectHost(tab.getAttribute('data-host')) })
-        tab.addEventListener('keydown', function (event) {
-          var next = tabAfter(event.key, tab)
-          if (!next) return
-          event.preventDefault()
-          selectHost(next.getAttribute('data-host'))
-          next.focus()
+      function bindTabs(root) {
+        root.querySelectorAll('button.host-tab').forEach(function (tab) {
+          tab.addEventListener('click', function () { selectHost(tab.getAttribute('data-host')) })
+          tab.addEventListener('keydown', function (event) {
+            var next = tabAfter(event.key, tab)
+            if (!next) return
+            event.preventDefault()
+            selectHost(next.getAttribute('data-host'))
+            next.focus()
+          })
         })
-      })
+      }
+      bindTabs(document)
 
       // The panel follows the focused workspace's host. While the page is visible, every FOCUS_POLL_MS (and on load and
       // when it becomes visible) the worker reports which host the focused workspace is on. A change of that host selects
@@ -749,6 +759,30 @@
         if (oldNode.childNodes.length !== newNode.childNodes.length) return
         for (var j = 0; j < newNode.childNodes.length; j++) patchLive(oldNode.childNodes[j], newNode.childNodes[j])
       }
+      // What the person selected on the page (tab, face, view), kept across a replaced <main>.
+      function pageState() {
+        var tab = document.querySelector('button.host-tab[aria-selected="true"]')
+        var card = document.querySelector('section.host')
+        return { tab: tab && tab.getAttribute('data-host'), face: card && card.getAttribute('data-face'), view: card && card.getAttribute('data-view') }
+      }
+      function restoreState(state) {
+        document.querySelectorAll('section.host').forEach(function (card) {
+          if (state.face) setFace(card, state.face)
+          if (state.view) setView(card, state.view)
+        })
+        if (state.tab) selectHost(state.tab)
+      }
+      // A render whose structure changed (another account, a state, a chip) replaces <main> in place: no reload, and the
+      // worker, which no longer writes the page, is not restarted. The structure key is the worker's digest of the
+      // render with its digits taken out, so a change of numbers alone never replaces anything.
+      function replaceMain(page, fresh) {
+        var state = pageState()
+        page.replaceChildren.apply(page, Array.prototype.map.call(fresh.childNodes, function (node) { return document.importNode(node, true) }))
+        bindToggles(page)
+        bindCommands(page)
+        bindTabs(page)
+        restoreState(state)
+      }
       function pollLive() {
         if (liveBusy || !hostHasRequest() || document.visibilityState !== 'visible') return
         liveBusy = true
@@ -760,13 +794,15 @@
             var fresh = new DOMParser().parseFromString(live.html, 'text/html').querySelector('main')
             var page = document.querySelector('main')
             if (!fresh || !page) return
-            patchLive(page, fresh)
+            if (live.data.structureKey && live.data.structureKey !== data.structureKey) replaceMain(page, fresh)
+            else patchLive(page, fresh)
             data = live.data
             ageLines()
             if (typeof window.grazrDraw === 'function') window.grazrDraw()
           } catch (e) {}
         })
       }
+      pollLive()
       setInterval(pollLive, LIVE_POLL_MS)
       document.addEventListener('visibilitychange', pollLive)
 

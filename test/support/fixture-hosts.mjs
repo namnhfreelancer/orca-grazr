@@ -7,4 +7,4 @@ export const FIXTURE_HOSTS = [
   { name: 'devbox-2', ssh: 'devbox-2', python: 'python3', notifier: 'queue' },
 ]
 
-export const fixtureSettings = (overrides = {}) => mergeSettings({ mode: 'engine', hosts: FIXTURE_HOSTS, ...overrides })
+export const fixtureSettings = (overrides = {}) => mergeSettings({ mode: 'engine', panelLive: false, hosts: FIXTURE_HOSTS, ...overrides })

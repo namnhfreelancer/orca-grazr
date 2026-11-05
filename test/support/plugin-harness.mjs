@@ -165,7 +165,7 @@ export async function start({ stored = null, storage = {}, context = null, route
   // No stored settings gets the three-host fixture; a settings file that names keys keeps them and gets the fixture hosts
   // unless it names its own; an explicit empty file ({}) stays empty, so the defaults apply.
   // These tests drive the engine mode; the Orca accounts mode has its own tests.
-  const withHosts = stored === null ? { mode: 'engine', hosts: FIXTURE_HOSTS } : Object.keys(stored).length ? { mode: 'engine', hosts: FIXTURE_HOSTS, ...stored } : stored
+  const withHosts = stored === null ? { mode: 'engine', panelLive: false, hosts: FIXTURE_HOSTS } : Object.keys(stored).length ? { mode: 'engine', panelLive: false, hosts: FIXTURE_HOSTS, ...stored } : stored
   const fake = fakeOrca({ stored: withHosts, context, storage, flags: { rejectSettingsGet, rejectStorageSet, noPanels } })
   const ex = fakeExec(route)
   const plugin = await createGrazrPlugin({

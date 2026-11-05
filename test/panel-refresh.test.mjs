@@ -420,3 +420,18 @@ test('a change beyond the numbers is written at once, however recent the last wr
   h.state.report = withThresholds(10)
   assert.equal(await h.refresher.refresh(), 'written')
 })
+
+test('in the live mode nothing is written, and the structure key moves only when more than numbers change', async () => {
+  const withThresholds = (remaining) => ({ ...report(remaining), settings: { enabled: true, thresholds: { session: 15, weekly: 20 } } })
+  const h = harness({ settings: fixtureSettings({ panelLive: true }), state: { report: withThresholds(47) } })
+  assert.equal(await h.refresher.refresh(), 'live')
+  const first = h.refresher.latest().data.structureKey
+  h.state.report = withThresholds(46)
+  assert.equal(await h.refresher.refresh(), 'live')
+  assert.equal(h.refresher.latest().data.structureKey, first)
+  assert.match(h.refresher.latest().html, /46%/)
+  h.state.report = withThresholds(10)
+  await h.refresher.refresh()
+  assert.notEqual(h.refresher.latest().data.structureKey, first)
+  assert.equal(h.fs.renames.length, 0)
+})
