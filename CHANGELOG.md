@@ -4,6 +4,12 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.10.0 - 2026-11-05
+
+### Added
+
+- After a swap, idle Claude terminal sessions still on the previous account are restarted with `--resume` on the selected one, on this Mac and on every paired environment (`orcaAccounts.restartSessions`, default `restart`). Orca moves only this Mac's sessions itself, so on a paired environment nothing moved them before. Busy sessions are restarted once idle; on this Mac Orca's own restart gets 90 seconds first. Native Orca chats move on their next message without help.
+
 ## 0.9.0 - 2026-11-05
 
 Rotates Orca's own Claude accounts (Settings › AI Provider Accounts) instead of the System default login, on this Mac and every paired Orca environment. The engine mode stays available.

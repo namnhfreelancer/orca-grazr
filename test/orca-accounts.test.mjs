@@ -71,12 +71,13 @@ function runnerWith(byEnvironment, storage = fakeStorage(), over = {}) {
 test('the Orca accounts mode is the default, with its own thresholds', () => {
   const s = mergeSettings(undefined)
   assert.equal(s.mode, 'orca-accounts')
-  assert.deepEqual(s.orcaAccounts, { thresholds: { session: 15, weekly: 10 }, environments: 'all', localName: 'mac' })
+  assert.deepEqual(s.orcaAccounts, { thresholds: { session: 15, weekly: 10 }, environments: 'all', localName: 'mac', restartSessions: 'restart' })
 })
 
 test('a bad orcaAccounts value falls back key by key', () => {
-  const s = mergeSettings({ orcaAccounts: { thresholds: { session: 150, weekly: 20 }, environments: 7, localName: ' ' } })
-  assert.deepEqual(s.orcaAccounts, { thresholds: { session: 15, weekly: 20 }, environments: 'all', localName: 'mac' })
+  const s = mergeSettings({ orcaAccounts: { thresholds: { session: 150, weekly: 20 }, environments: 7, localName: ' ', restartSessions: 'sometimes' } })
+  assert.deepEqual(s.orcaAccounts, { thresholds: { session: 15, weekly: 20 }, environments: 'all', localName: 'mac', restartSessions: 'restart' })
+  assert.equal(mergeSettings({ orcaAccounts: { restartSessions: 'off' } }).orcaAccounts.restartSessions, 'off')
   assert.equal(mergeSettings({ mode: 'other' }).mode, 'orca-accounts')
 })
 

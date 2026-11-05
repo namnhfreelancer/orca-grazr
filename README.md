@@ -69,6 +69,16 @@ This is the default mode. Grazr manages this Mac (its card is named after `orcaA
 
 On every drain tick (`drainIntervalMs`), for each host with rotation on, Grazr reads the accounts through Orca's runtime (`accounts.list`, with a usage refresh) and, when the active account has less than `orcaAccounts.thresholds.session` percent left in its 5-hour window or less than `orcaAccounts.thresholds.weekly` percent left in its weekly window, selects the next account through `accounts.selectClaude`, exactly as picking it in Settings does. Orca then treats the Claude sessions already running as it does for a switch in Settings, following your choice there to keep them, restart them on the new account, or ask. The next account is the first one in Orca's account order, other than the active one, that does not need a sign-in and has no live window below its threshold. An account whose usage Orca has not read yet counts as available. With nothing to swap to, one notification says so, and the next one comes only after the active account has recovered.
 
+### Running sessions after a swap
+
+A Claude process keeps the account it started with, so a swap reaches a running session only when that session restarts. Grazr makes that happen, and the conversation carries on (`--resume`), with `orcaAccounts.restartSessions` set to `restart` (the default):
+
+- **Native Orca chats** need nothing: on the chat's next message, Orca sees that the selected account changed, replaces the chat's process and resumes the conversation on the new account, on this Mac and on a paired environment alike.
+- **Claude in a terminal pane**: on every drain tick, Grazr lists the host's Claude panes (`session.tabs.listAll`) and restarts each idle one whose session still runs on an account other than the selected one: Ctrl-C, `/exit`, then, back at the pane's shell, `claude <Orca's default Claude args> --resume <session>` (`settings.getAgentLaunch`). Orca's shell integration runs `claude` on the account selected at that moment, so the session resumes on the new account. A pane that is busy is restarted at a later tick, once it is idle; a pane is tried at most once every 30 minutes for the same session. A relaunch interrupted by a worker restart is finished on the next tick.
+- On this Mac, Orca restarts sessions itself when **Settings › AI Provider Accounts** says so, and asks by default. Grazr waits 90 seconds after a swap there and then moves what is still on the old account. To skip Orca's question, choose to restart and not ask again the first time it appears; the plugin API cannot change that setting.
+
+Set `restartSessions` to `off` to leave running sessions alone.
+
 The calls go through Orca's own CLI client, run in Electron's Node mode from the Orca app at `orcaApp` (default `/Applications/Orca.app`), with `ORCA_ENVIRONMENT` naming the environment for a paired host. See `lib/orca-accounts.mjs` and `lib/orca-rpc.cjs`.
 
 Settings of this mode, in `orcaAccounts`:
@@ -76,6 +86,7 @@ Settings of this mode, in `orcaAccounts`:
 - `thresholds`: `{ "session": 15, "weekly": 10 }`, the percent left below which the active account is swapped away from.
 - `environments`: `"all"` (the default), `"none"` for this Mac alone, or a list of environment names to rotate on.
 - `localName`: the name of this Mac's card and toasts. The default is `mac`.
+- `restartSessions`: `restart` (the default) or `off`. See [Running sessions after a swap](#running-sessions-after-a-swap).
 
 Rotation is turned on or off per host with `Grazr: Turn rotation on/off` or the panel's button, and is stored in the plugin's own storage. `Swap to the next account` and the panel's `Swap to` buttons select an account right away. Install, uninstall, enrol and the sign-in commands have nothing to do in this mode: add or re-authenticate accounts in **Settings › AI Provider Accounts**. The `hosts`, `engineDir`, `stateDir`, `configDir`, `ssh*` and `rsyncBin` settings apply to the engine mode only.
 
