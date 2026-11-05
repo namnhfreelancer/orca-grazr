@@ -4,6 +4,12 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.14.0 - 2026-11-06
+
+### Added
+
+- Orca accounts mode: a **Skip** / **Include** button on each account of the panel leaves that account out of the automatic rotation on that host, or takes it back in. A skipped account is never picked by a tick or by `Swap to next`; switching to it by name still works. Stored per host in the plugin's storage (`orcaSkipped`).
+
 ## 0.13.1 - 2026-11-05
 
 ### Fixed

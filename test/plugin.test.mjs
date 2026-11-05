@@ -20,8 +20,8 @@ test('registers exactly the fourteen manifest command ids and the two events', a
 
 test('every command is also a panel request handler on a host with orca.panels.handle, answering as the command does', async () => {
   const { commands, panelHandlers } = await start()
-  // Plus panel-live, which only the page asks: its latest render, to update its numbers in place.
-  assert.deepEqual([...panelHandlers.keys()].sort(), [...commands.keys(), 'panel-live'].sort())
+  // Plus the ones only the page asks: panel-live (its latest render, to update its numbers in place) and account-skip.
+  assert.deepEqual([...panelHandlers.keys()].sort(), [...commands.keys(), 'account-skip', 'panel-live'].sort())
   const viaPanel = await panelHandlers.get('status')({})
   const viaCommand = await commands.get('status')({})
   assert.deepEqual(viaPanel, viaCommand)
@@ -454,4 +454,13 @@ test('a host call refused for want of current consent starts one detached approv
   assert.equal(spawned[0].opts.env.ELECTRON_RUN_AS_NODE, '1')
   clock += HEAL_GAP_MS
   assert.equal(guard.trip(), true)
+})
+
+test('account-skip is for one Orca account: in the engine mode it refuses and runs nothing', async () => {
+  const fake = await start()
+  const before = fake.execs.length
+  const reply = await fake.panelHandlers.get('account-skip')({ host: 'mac', account: 'a', skip: true })
+  assert.equal(reply.ok, false)
+  assert.match(reply.message, /skip is for one Orca account/)
+  assert.equal(fake.execs.slice(before).some((a) => label(a).startsWith('skip')), false)
 })

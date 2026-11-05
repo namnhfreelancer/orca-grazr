@@ -117,9 +117,11 @@ test('reset reads "resets <day> <time>" in the given zone, and is empty without 
 
 // --- account fields ---
 
-test('each entry has name, 1-based index, missing, active, blocked, listed, plan, organization, updated, action and windows', () => {
+test('each entry has name, 1-based index, missing, active, blocked, listed, skipped, plan, organization, updated, action and windows', () => {
   const [a] = listed(fixture())
-  assert.deepEqual(Object.keys(a).sort(), ['action', 'active', 'blocked', 'index', 'listed', 'missing', 'name', 'organization', 'plan', 'updated', 'windows'])
+  assert.deepEqual(Object.keys(a).sort(), ['action', 'active', 'blocked', 'index', 'listed', 'missing', 'name', 'organization', 'plan', 'skipped', 'updated', 'windows'])
+  // The engine reports no skip, so the entry has none to toggle.
+  assert.equal(a.skipped, null)
   assert.equal(a.name, 'a')
   assert.equal(a.index, 1)
   assert.equal(a.missing, false)
@@ -403,4 +405,29 @@ test('planLabel takes the last non-empty underscore segment as the multiplier, o
 
 test('planLabel capitalises an unmapped plan type word by word, the rest of each word lower case', () => {
   assert.equal(planLabel({ type: 'claude_FREE_trial' }), 'Free Trial')
+})
+
+test('an Orca account carries a Skip toggle; a skipped one is chipped, offers Include and is never next', () => {
+  const report = fixture()
+  report.order = []
+  report.accounts.forEach((a) => { a.skipped = false })
+  report.accounts[1].skipped = true
+  const html = cardOf(report, { commands: CMD })
+  assert.ok(acct(html, 'b').includes('<span class="chip chip-muted" title="The automatic rotation never swaps to it; Switch still does">Skipped</span>'))
+  assert.ok(acct(html, 'b').includes('data-command="account-skip" data-params="{&quot;host&quot;:&quot;mac&quot;,&quot;account&quot;:&quot;b&quot;,&quot;skip&quot;:false}"'))
+  assert.ok(acct(html, 'b').includes('>Include</button>'))
+  assert.ok(acct(html, 'a').includes('&quot;skip&quot;:true}"'))
+  assert.ok(acct(html, 'a').includes('>Skip</button>'))
+  // Switch stays: skipping leaves out the automatic rotation only.
+  assert.ok(acct(html, 'b').includes('act-swap-to'))
+  // The dial rows say so, and the next account is the one after it.
+  assert.ok(html.includes('<span class="row-name">b</span><span class="row-pct">100%</span><span class="row-label">skipped</span>'))
+  assert.ok(html.includes('<span class="row-name">d</span>'))
+  assert.equal(html.includes('<span class="row-name">b</span><span class="row-pct">100%</span><span class="row-label">NEXT'), false)
+})
+
+test('an engine account has no Skip toggle', () => {
+  const html = cardOf(fixture(), { commands: CMD })
+  assert.equal(html.includes('account-skip'), false)
+  assert.equal(html.includes('row-acts'), false)
 })

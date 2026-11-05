@@ -227,3 +227,43 @@ test('an account a host has not read borrows the latest reading of the same emai
   shareReadings(late, NOW + 31 * 60000)
   assert.equal(late.accounts.find((a) => a.id === B.id).snapshot, null)
 })
+
+test('a skipped account is never the one a rotation picks, and the skip is kept per host', async () => {
+  const state = { active: A.id, usages: { [A.id]: usage(90, 20), [B.id]: usage(10, 10), [C.id]: usage(10, 10) } }
+  const { runner, orca, storage } = runnerWith({ local: state })
+  assert.deepEqual((await runner.runLines(MAC, ['skip', 'b@example.com', '1'])).lines, ['b@example.com is skipped by the rotation'])
+  assert.deepEqual(storage.data.orcaSkipped, { mac: [B.id] })
+  const status = (await runner.runJson(MAC, ['status', '--json'])).value
+  assert.deepEqual(status.accounts.map((a) => a.skipped), [false, true, false])
+  const result = await runner.runLines(MAC, ['notices-drain'])
+  assert.deepEqual(result.lines.map((l) => JSON.parse(l)), [{ title: 'grazr: swapped', body: 'a@example.com (5h 10% left) → c@example.com' }])
+  assert.equal(state.active, C.id)
+  // A person can still switch to it by name.
+  assert.deepEqual((await runner.runLines(MAC, ['swap', 'b@example.com'])).lines, ['Swapped c@example.com → b@example.com'])
+  assert.equal(orca.calls.at(-1).params.accountId, B.id)
+})
+
+test('with every other account skipped, the tick says there is nothing to swap to', async () => {
+  const state = { active: A.id, usages: { [A.id]: usage(95, 0), [B.id]: usage(0, 0) } }
+  const { runner, orca, storage } = runnerWith({ local: state }, fakeStorage({ orcaSkipped: { mac: [B.id, C.id] } }))
+  const first = await runner.runLines(MAC, ['notices-drain'])
+  assert.equal(JSON.parse(first.lines[0]).title, 'grazr: no account to swap to')
+  assert.equal(orca.calls.some((c) => c.method === 'accounts.selectClaude'), false)
+  assert.equal((await runner.runLines(MAC, ['swap'])).ok, false)
+  // Taking one back in lets the next tick swap to it; the skip list is emptied and dropped.
+  assert.deepEqual((await runner.runLines(MAC, ['skip', B.id, '0'])).lines, ['b@example.com is back in the rotation'])
+  assert.deepEqual(storage.data.orcaSkipped, { mac: [C.id] })
+  await runner.runLines(MAC, ['skip', 'c@example.com', '0'])
+  assert.deepEqual(storage.data.orcaSkipped, {})
+  await runner.runLines(MAC, ['notices-drain'])
+  assert.equal(state.active, B.id)
+})
+
+test('skip refuses an unknown account or a missing flag, and a skip on one host leaves the other alone', async () => {
+  const { runner, storage } = runnerWith({ local: { active: A.id }, VPS: { active: A.id } })
+  assert.equal((await runner.runLines(MAC, ['skip', 'nobody@example.com', '1'])).ok, false)
+  assert.equal((await runner.runLines(MAC, ['skip', 'b@example.com'])).ok, false)
+  await runner.runLines(VPS, ['skip', 'b@example.com', '1'])
+  assert.deepEqual(storage.data.orcaSkipped, { VPS: [B.id] })
+  assert.equal((await runner.runJson(MAC, ['status', '--json'])).value.accounts[1].skipped, false)
+})

@@ -100,6 +100,10 @@ Settings of this mode, in `orcaAccounts`:
 - `restartSessions`: `restart` (the default) or `off`. See [Running sessions after a swap](#running-sessions-after-a-swap).
 - `continueChats`: `continue` (the default) or `off`, and `ssh`: the ssh alias of each paired environment whose chats Grazr may continue. See [When a session hits a usage limit](#when-a-session-hits-a-usage-limit).
 
+### Leaving an account out of the rotation
+
+Each account on the panel (List face, and the rows under the Dial and Clock) has a **Skip** button. A skipped account is chipped `Skipped`, its rows read `skipped`, and the automatic rotation and `Swap to next` never pick it; a swap away from it when it runs low still happens, and its own `Switch` / `Swap to` button still selects it. **Include** takes it back in. The choice is per host (the same email on the Mac and on a paired environment is skipped on each separately) and is stored in the plugin's own storage (`orcaSkipped`). With every other account skipped or spent, the tick says there is nothing to swap to.
+
 Rotation is turned on or off per host with `Grazr: Turn rotation on/off` or the panel's button, and is stored in the plugin's own storage. `Swap to the next account` and the panel's `Swap to` buttons select an account right away. Install, uninstall, enrol and the sign-in commands have nothing to do in this mode: add or re-authenticate accounts in **Settings › AI Provider Accounts**. The `hosts`, `engineDir`, `stateDir`, `configDir`, `ssh*` and `rsyncBin` settings apply to the engine mode only.
 
 ## Settings

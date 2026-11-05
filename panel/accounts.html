@@ -297,6 +297,13 @@
       .row-next .row-label { color: var(--grazr-next); }
       .row-blocked .row-label { color: var(--orca-destructive, var(--destructive, #f87171)); }
       .row-active .row-label { color: var(--grazr-ok); }
+      .row > .row-acts {
+        grid-column: 2 / -1;
+        display: flex;
+        gap: 6px;
+        margin: 2px 0 2px;
+      }
+      .row-acts > .act { font-size: 11px; }
       .row > .act {
         grid-column: 2 / -1;
         justify-self: start;
