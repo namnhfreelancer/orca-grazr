@@ -4,6 +4,13 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.12.2 - 2026-11-05
+
+### Fixed
+
+- A chat a usage limit stopped was missed when it had any submission on record: a settled one (accepted or rejected) no longer counts as a message in flight.
+- A stopped chat that still ran background tasks (a dev server it started, a long command) kept its process, and with it the spent account, so even a message of your own hit the limit again. Grazr now stops those background tasks the way the chat's Stop button does, waits for them to end, and then sends the continue message, so Orca restarts the chat on the selected account; the agent starts again what it needs.
+
 ## 0.12.1 - 2026-11-05
 
 ### Fixed

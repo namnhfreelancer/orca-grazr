@@ -6,7 +6,7 @@ import { createOrcaRunner, forgetSharedReadings } from '../lib/orca-accounts.mjs
 import { relaunchLine, showsUsageLimit } from '../lib/orca-session-mover.mjs'
 
 const require = createRequire(import.meta.url)
-const { cutOf, canonicalize } = require('../lib/orca-chat-helper.cjs')
+const { cutOf, canonicalize, workingTasks } = require('../lib/orca-chat-helper.cjs')
 
 const NOW = Date.parse('2026-11-05T06:00:00Z')
 const HOUR = 3600000
@@ -38,9 +38,20 @@ test('a chat whose latest turn a usage limit ended, with nothing sent since, is 
 
 test('a working chat, a pending send, a running turn or an older limit row is not a cut', () => {
   assert.equal(cutOf(limitedPage({ working: true })), null)
-  assert.equal(cutOf(limitedPage({ submissions: [{ clientMessageId: 'x' }] })), null)
+  assert.equal(cutOf(limitedPage({ submissions: [{ clientMessageId: 'x', dispatchState: 'unknown' }] })), null)
   assert.equal(cutOf(limitedPage({ latestTurn: { itemId: TURN, turn: { state: 'running' } } })), null)
   assert.equal(cutOf(limitedPage({ latestTurn: { itemId: 'legacy:claude:x:turn-lifecycle%3A2', turn: { state: 'completed' } } })), null)
+})
+
+test('a settled submission does not block the cut; one still in flight does', () => {
+  assert.notEqual(cutOf(limitedPage({ submissions: [{ clientMessageId: 'x', dispatchState: 'accepted', resolvedAt: NOW }] })), null)
+  assert.equal(cutOf(limitedPage({ submissions: [{ clientMessageId: 'x', dispatchState: 'pending' }] })), null)
+})
+
+test('the background tasks still working are the ones a move must stop first', () => {
+  const page = { backgroundTasks: { tasks: [{ id: 'a', state: 'working' }, { id: 'b', state: 'done' }] } }
+  assert.deepEqual(workingTasks(page).map((t) => t.id), ['a'])
+  assert.deepEqual(workingTasks({}), [])
 })
 
 test('the continue fingerprint canonicalizes keys the way Orca does', () => {
@@ -112,7 +123,7 @@ test('a chat that hit the limit on the active account swaps at once, before Orca
   const host = fakeHost({ usages: { [A.id]: usage(60) }, cuts: [cut(A.id)] })
   const result = await runner(host).runLines(MAC, ['notices-drain'])
   assert.equal(host.state.active, B.id)
-  assert.deepEqual(host.state.sent, [['claude_s1', TURN, '4']])
+  assert.deepEqual(host.state.sent, [['claude_s1', TURN]])
   assert.deepEqual(result.lines.map((l) => JSON.parse(l).title), ['grazr: swapped', 'grazr: chats continued'])
   assert.match(JSON.parse(result.lines[0]).body, /usage limit reached/)
 })
