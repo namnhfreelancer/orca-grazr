@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mergeSettings } from '../lib/hosts.mjs'
-import { createOrcaRunner, createOrcaHosts, orcaRpc, reportFrom } from '../lib/orca-accounts.mjs'
+import { createOrcaRunner, createOrcaHosts, orcaRpc, reportFrom, forgetSharedReadings } from '../lib/orca-accounts.mjs'
 import { nextAccount } from '../lib/panel-data.mjs'
 
 const NOW = Date.parse('2026-11-05T06:00:00Z')
@@ -64,6 +64,8 @@ const VPS = { name: 'VPS', ssh: null, orcaEnvironment: 'VPS', notifier: 'queue' 
 
 // The rotation tests leave session moving and chat continuing to their own tests.
 function runnerWith(byEnvironment, storage = fakeStorage(), over = {}) {
+  // Each test starts with no readings shared from an earlier one.
+  forgetSharedReadings()
   const orca = fakeOrca(byEnvironment)
   const runner = createOrcaRunner({ settings: settings({ ...over, orcaAccounts: { restartSessions: 'off', continueChats: 'off', ...over.orcaAccounts } }), exec: orca.exec, storage, now: () => NOW })
   return { runner, orca, storage }
@@ -207,4 +209,21 @@ test('the hosts are this Mac and the allowed environments, read once a minute', 
   assert.deepEqual((await hostsFor(settings({ orcaAccounts: { environments: 'none' } }))).map((h) => h.name), ['mac'])
   await hostsFor(settings())
   assert.equal(reads, 2)
+})
+
+test('an account a host has not read borrows the latest reading of the same email from another host', async () => {
+  const { shareReadings, forgetSharedReadings } = await import('../lib/orca-accounts.mjs')
+  forgetSharedReadings()
+  const read = reportFrom(listed({ active: A.id, usages: { [A.id]: usage(10, 10), [B.id]: usage(70, 20) } }), { thresholds: { session: 15, weekly: 10 }, enabled: true })
+  shareReadings(read, NOW)
+  const unread = reportFrom(listed({ active: C.id, usages: { [C.id]: usage(5, 5) } }), { thresholds: { session: 15, weekly: 10 }, enabled: true })
+  shareReadings(unread, NOW + 60000)
+  const b = unread.accounts.find((a) => a.id === B.id)
+  assert.deepEqual(b.snapshot.map((e) => [e.group, e.remaining]), [['session', 30], ['weekly', 80]])
+  // A reading older than half an hour is not borrowed.
+  forgetSharedReadings()
+  shareReadings(read, NOW)
+  const late = reportFrom(listed({ active: C.id, usages: { [C.id]: usage(5, 5) } }), { thresholds: { session: 15, weekly: 10 }, enabled: true })
+  shareReadings(late, NOW + 31 * 60000)
+  assert.equal(late.accounts.find((a) => a.id === B.id).snapshot, null)
 })

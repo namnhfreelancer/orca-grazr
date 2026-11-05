@@ -4,6 +4,14 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.12.1 - 2026-11-05
+
+### Fixed
+
+- The panel no longer flips between this Mac's tab and the focused server's in a loop. A write restarts the worker in a development install; the new worker rendered the target setting's host, the follow then selected the focused workspace's host again, and that write restarted the worker once more. The selected host is now kept in the plugin's storage across restarts.
+- In the Orca accounts mode, a host whose status fails once within 3 minutes of a good reading keeps that reading on the panel, so one dropped call does not flip the card to unreachable and back.
+- An account a host has not read (Orca reads an inactive account only once Claude has run on it there) shows the latest reading of the same account from another host, up to 30 minutes old, and rotation uses it too.
+
 ## 0.12.0 - 2026-11-05
 
 ### Added

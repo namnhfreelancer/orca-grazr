@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { mergeSettings } from '../lib/hosts.mjs'
-import { createOrcaRunner } from '../lib/orca-accounts.mjs'
+import { createOrcaRunner, forgetSharedReadings } from '../lib/orca-accounts.mjs'
 import { relaunchLine, showsUsageLimit } from '../lib/orca-session-mover.mjs'
 
 const require = createRequire(import.meta.url)
@@ -99,7 +99,7 @@ const storage = () => {
   const data = {}
   return { data, get: async (k) => data[k], set: async (k, v) => { data[k] = structuredClone(v) } }
 }
-const runner = (host) => createOrcaRunner({
+const runner = (host) => forgetSharedReadings() ?? createOrcaRunner({
   settings: mergeSettings({ mode: 'orca-accounts', orcaAccounts: { restartSessions: 'off' } }),
   exec: host.exec,
   storage: storage(),
