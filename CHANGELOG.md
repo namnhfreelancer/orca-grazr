@@ -4,6 +4,12 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.11.1 - 2026-11-05
+
+### Fixed
+
+- The panel of a development install no longer flashes every minute or so. Each write of `panel/accounts.html` makes Orca reload the plugin (the panel and the worker), and a page whose only change was a percentage or a reset time was written on every tick. Such a page is now written at most once every 10 minutes; any other change (active account, next, states, chips, selected host) and a palette command still write at once.
+
 ## 0.11.0 - 2026-11-05
 
 ### Added

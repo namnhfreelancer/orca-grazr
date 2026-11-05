@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createPanelRefresher } from '../lib/panel-refresh.mjs'
+import { createPanelRefresher, NUMBERS_REWRITE_MS } from '../lib/panel-refresh.mjs'
 import { fixtureSettings } from './support/fixture-hosts.mjs'
 import { clockOf } from '../lib/panel.mjs'
 
@@ -381,4 +381,42 @@ test('after an installed copy is skipped, a refresh whose only change is list.ac
   assert.equal(fs.stats.length, 1, 'the key matched, so no write was attempted')
   assert.equal(h.logs.filter((m) => m.startsWith('grazr: panel skipped')).length, 1)
   assert.equal(fs.renames.length, 0)
+})
+
+// A file system that knows when the page was last written, as a real one does.
+function timedFs(clock) {
+  const fs = fakeFs()
+  let writtenAt = null
+  const rename = fs.rename
+  const stat = fs.stat
+  fs.rename = async (from, to) => { await rename(from, to); if (to === PANEL) writtenAt = clock.now }
+  fs.stat = async (path) => (path === PANEL && writtenAt !== null ? { mtimeMs: writtenAt } : stat(path))
+  return fs
+}
+
+test('a page whose numbers alone moved is rewritten at most once per NUMBERS_REWRITE_MS, so a dev panel does not keep reloading', async () => {
+  const withThresholds = (remaining) => ({ ...report(remaining), settings: { enabled: true, thresholds: { session: 15, weekly: 20 } } })
+  const clock = { now: Date.parse('2026-10-22T00:24:30Z') }
+  const h = harness({ fs: timedFs(clock), clock, state: { report: withThresholds(47) } })
+  assert.equal(await h.refresher.refresh(), 'written')
+  h.state.report = withThresholds(46)
+  clock.now += 60000
+  assert.equal(await h.refresher.refresh(), 'unchanged')
+  // A person asking writes the new numbers at once.
+  assert.equal(await h.refresher.refresh({ fresh: true }), 'written')
+  h.state.report = withThresholds(45)
+  clock.now += NUMBERS_REWRITE_MS
+  assert.equal(await h.refresher.refresh(), 'written')
+  assert.equal(h.fs.renames.length, 3)
+})
+
+test('a change beyond the numbers is written at once, however recent the last write', async () => {
+  const withThresholds = (remaining) => ({ ...report(remaining), settings: { enabled: true, thresholds: { session: 15, weekly: 20 } } })
+  const clock = { now: Date.parse('2026-10-22T00:24:30Z') }
+  const h = harness({ fs: timedFs(clock), clock, state: { report: withThresholds(47) } })
+  assert.equal(await h.refresher.refresh(), 'written')
+  clock.now += 1000
+  // Below the 15% threshold the account's state and tone change, not only its number.
+  h.state.report = withThresholds(10)
+  assert.equal(await h.refresher.refresh(), 'written')
 })
