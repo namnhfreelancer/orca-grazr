@@ -102,7 +102,7 @@ function fakeHost({ active = A.id, usages = {}, cuts = [] } = {}) {
     }
     return { code: 1, stdout: JSON.stringify({ ok: false, error: { code: 'method_not_found', message: method } }), stderr: '' }
   }
-  return { exec, state }
+  return { exec, state, cuts }
 }
 
 const MAC = { name: 'mac', orcaEnvironment: null, notifier: 'queue' }
@@ -163,4 +163,14 @@ test('the helper runs when piped to `node -`, as it is over ssh', async () => {
   const source = readFileSync(new URL('../lib/orca-chat-helper.cjs', import.meta.url), 'utf8')
   const run = spawnSync(process.execPath, ['-', 'bogus'], { input: source, encoding: 'utf8' })
   assert.equal(JSON.parse(run.stdout.trim()).error.code, 'invalid_argument')
+})
+
+test('a chat that keeps stopping at the limit after each continue is left alone after three', async () => {
+  const host = fakeHost({ active: B.id })
+  const r = runner(host)
+  for (let i = 1; i <= 5; i += 1) {
+    host.cuts.splice(0, host.cuts.length, { ...cut(A.id), turnItemId: `${TURN}-${i}` })
+    await r.runLines(MAC, ['notices-drain'])
+  }
+  assert.equal(host.state.sent.length, 3)
 })

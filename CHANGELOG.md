@@ -4,6 +4,13 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.12.3 - 2026-11-05
+
+### Fixed
+
+- After stopping a chat's background tasks, the continue message waits until the chat reports no background work at all, since a send before that still reached the old process on the spent account and stopped at the limit again.
+- A chat is continued at most three times in 30 minutes, so a chat whose process cannot be moved is not sent the continue message on every tick.
+
 ## 0.12.2 - 2026-11-05
 
 ### Fixed
