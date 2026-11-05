@@ -4,6 +4,13 @@ All notable changes to this plugin are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.12.4 - 2026-11-05
+
+### Fixed
+
+- A chat a limit stopped no longer needs a second tick to move. Every open background task is stopped first, whatever its state (a subagent the limit blocked held the old process as well as a running one did), and the turn the continue starts is watched for up to 20 seconds: if it stops at the limit again, the send reached the old process, and the message is sent once more at once.
+- The continue message names the background tasks that were stopped to move the chat and asks the agent to start again those it still needs. Before, an agent resumed its main work but not, for example, a review it had running in the background.
+
 ## 0.12.3 - 2026-11-05
 
 ### Fixed

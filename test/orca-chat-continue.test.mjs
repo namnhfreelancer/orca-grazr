@@ -6,7 +6,7 @@ import { createOrcaRunner, forgetSharedReadings } from '../lib/orca-accounts.mjs
 import { relaunchLine, showsUsageLimit } from '../lib/orca-session-mover.mjs'
 
 const require = createRequire(import.meta.url)
-const { cutOf, canonicalize, workingTasks } = require('../lib/orca-chat-helper.cjs')
+const { cutOf, canonicalize, workingTasks, continueText } = require('../lib/orca-chat-helper.cjs')
 
 const NOW = Date.parse('2026-11-05T06:00:00Z')
 const HOUR = 3600000
@@ -48,10 +48,15 @@ test('a settled submission does not block the cut; one still in flight does', ()
   assert.equal(cutOf(limitedPage({ submissions: [{ clientMessageId: 'x', dispatchState: 'pending' }] })), null)
 })
 
-test('the background tasks still working are the ones a move must stop first', () => {
-  const page = { backgroundTasks: { tasks: [{ id: 'a', state: 'working' }, { id: 'b', state: 'done' }] } }
-  assert.deepEqual(workingTasks(page).map((t) => t.id), ['a'])
+test('every open, stoppable background task must be stopped before a move, whatever its state', () => {
+  const page = { backgroundTasks: { tasks: [{ id: 'a', state: 'working' }, { id: 'b', state: 'done' }, { id: 'c', state: 'blocked' }, { id: 'd', state: 'working', stoppable: false }] } }
+  assert.deepEqual(workingTasks(page).map((t) => t.id), ['a', 'c'])
   assert.deepEqual(workingTasks({}), [])
+})
+
+test('the continue message names the background tasks it stopped, so the agent starts them again', () => {
+  assert.equal(continueText([]), 'Continue where you left off.')
+  assert.equal(continueText(['Issue 129: review', 'yarn dev']), 'Continue where you left off. To move this chat to an account that still has usage, these background tasks were stopped: "Issue 129: review", "yarn dev". Start again any that you still need.')
 })
 
 test('the continue fingerprint canonicalizes keys the way Orca does', () => {
@@ -173,4 +178,54 @@ test('a chat that keeps stopping at the limit after each continue is left alone 
     await r.runLines(MAC, ['notices-drain'])
   }
   assert.equal(host.state.sent.length, 3)
+})
+
+// A chat on a host whose first continue reaches the old process (it stops at the limit again) and whose second runs.
+function chatHost({ firstLimited = true, tasks = [] } = {}) {
+  let turn = 1
+  let open = [...tasks]
+  const calls = []
+  const pageNow = () => {
+    const limited = turn === 1 || (turn === 2 && firstLimited)
+    const id = `turn-${turn}`
+    return {
+      sessionId: 'claude_s1', working: false, fence: 4 + turn, submissions: [], queuedMessages: [],
+      backgroundTasks: { state: open.length ? 'working' : 'idle', tasks: open },
+      latestTurn: { itemId: id, turn: { state: limited ? 'completed' : 'running' } },
+      items: limited ? [{ itemId: `s${turn}`, turnScope: { kind: 'turn', turnItemId: id }, body: { kind: 'status', failure: { kind: 'usageLimitReached' } } }] : [],
+    }
+  }
+  const rpc = async (method, params) => {
+    calls.push({ method, params })
+    if (method === 'agentSession.history') return { page: pageNow() }
+    if (method === 'agentSession.cancel') { open = []; return { ok: true } }
+    if (method === 'agentSession.send') { turn += 1; return { ok: true } }
+    throw new Error(method)
+  }
+  return { rpc, calls }
+}
+
+test('a continue that reaches the old process and stops at the limit again is sent once more at once', async () => {
+  const helper = require('../lib/orca-chat-helper.cjs')
+  const host = chatHost()
+  helper.useForTests({ rpc: host.rpc, pause: async () => {} })
+  const result = await helper.continueChat('claude_s1', 'turn-1')
+  assert.deepEqual({ attempts: result.attempts, outcome: result.outcome }, { attempts: 2, outcome: 'ok' })
+  const sends = host.calls.filter((c) => c.method === 'agentSession.send')
+  assert.equal(sends.length, 2)
+  // The first carries Orca's continuation field; the retry goes as a plain message.
+  assert.equal(sends[0].params.usageLimitContinuationOfTurnItemId, 'turn-1')
+  assert.equal(sends[1].params.usageLimitContinuationOfTurnItemId, undefined)
+})
+
+test('a chat with open background tasks has them stopped and named in a plain continue message', async () => {
+  const helper = require('../lib/orca-chat-helper.cjs')
+  const host = chatHost({ firstLimited: false, tasks: [{ id: 't1', state: 'working', description: 'Issue 129: review' }] })
+  helper.useForTests({ rpc: host.rpc, pause: async () => {} })
+  const result = await helper.continueChat('claude_s1', 'turn-1')
+  assert.equal(result.stoppedTasks, 1)
+  assert.equal(host.calls.filter((c) => c.method === 'agentSession.cancel').length, 1)
+  const send = host.calls.find((c) => c.method === 'agentSession.send')
+  assert.match(send.params.body.blocks[0].text, /"Issue 129: review"\. Start again any that you still need\./)
+  assert.equal(send.params.usageLimitContinuationOfTurnItemId, undefined)
 })
